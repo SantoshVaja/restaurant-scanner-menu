@@ -9,6 +9,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { QAReport } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { formatDateTimeIST } from '../lib/format.ts';
 
 export function QADashboard({ staffToken }: { staffToken: string }) {
@@ -20,11 +21,11 @@ export function QADashboard({ staffToken }: { staffToken: string }) {
     setRunning(true);
     setError(null);
     try {
-      const resp = await fetch('/api/qa/run', {
+      const resp = await apiFetch('/api/qa/run', {
         method: 'POST',
         headers: { Authorization: `Bearer ${staffToken}` },
       });
-      const data = await resp.json();
+      const data = await parseJsonSafe<QAReport & { error?: string }>(resp);
       if (!resp.ok) throw new Error(data.error || 'Failed to execute QA test suite');
       setReport(data);
     } catch (err: unknown) {

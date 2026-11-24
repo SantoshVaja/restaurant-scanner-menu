@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Bell, CheckCircle2, Utensils } from 'lucide-react';
 import type { AppNotification, DiningTable, KitchenTicket } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { useRealtimeRoom } from '../lib/ws.ts';
 import { StatusLabel } from '../components/ui.tsx';
 
@@ -10,18 +11,22 @@ export function WaiterDashboard({ staffToken }: { staffToken: string }) {
   const [alerts, setAlerts] = useState<AppNotification[]>([]);
 
   const loadData = useCallback(async () => {
-    const [wResp, nResp] = await Promise.all([
-      fetch('/api/waiter/overview', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/notifications', { headers: { Authorization: `Bearer ${staffToken}` } }),
-    ]);
-    if (wResp.ok) {
-      const wd = await wResp.json();
-      setTables(wd.tables || []);
-      setTickets(wd.tickets || []);
-    }
-    if (nResp.ok) {
-      const nd = await nResp.json();
-      setAlerts((nd.notifications || []).slice(0, 8));
+    try {
+      const [wResp, nResp] = await Promise.all([
+        apiFetch('/api/waiter/overview', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/notifications', { headers: { Authorization: `Bearer ${staffToken}` } }),
+      ]);
+      if (wResp.ok) {
+        const wd = await parseJsonSafe<{ tables?: DiningTable[]; tickets?: KitchenTicket[] }>(wResp);
+        setTables(wd.tables || []);
+        setTickets(wd.tickets || []);
+      }
+      if (nResp.ok) {
+        const nd = await parseJsonSafe<{ notifications?: AppNotification[] }>(nResp);
+        setAlerts((nd.notifications || []).slice(0, 8));
+      }
+    } catch {
+      // Ignore transient error
     }
   }, [staffToken]);
 
@@ -36,7 +41,7 @@ export function WaiterDashboard({ staffToken }: { staffToken: string }) {
   });
 
   async function markServed(ticketId: number) {
-    const resp = await fetch(`/api/waiter/tickets/${ticketId}/serve`, {
+    const resp = await apiFetch(`/api/waiter/tickets/${ticketId}/serve`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${staffToken}` },
     });

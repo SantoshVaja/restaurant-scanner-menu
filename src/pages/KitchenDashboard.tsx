@@ -12,6 +12,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { KitchenTicket } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { formatDateTimeIST, getElapsedMinutes } from '../lib/format.ts';
 import { useRealtimeRoom } from '../lib/ws.ts';
 import { StatusLabel } from '../components/ui.tsx';
@@ -51,11 +52,11 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
 
   const loadTickets = useCallback(async () => {
     try {
-      const resp = await fetch('/api/kitchen/tickets', {
+      const resp = await apiFetch('/api/kitchen/tickets', {
         headers: { Authorization: `Bearer ${staffToken}` },
       });
       if (!resp.ok) return;
-      const data = await resp.json();
+      const data = await parseJsonSafe<{ tickets?: KitchenTicket[] }>(resp);
       const list: KitchenTicket[] = data.tickets || [];
       const newCnt = list.filter((t) => t.status === 'new').length;
       if (newCnt > prevNewCountRef.current && prevNewCountRef.current >= 0) {
@@ -68,6 +69,8 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
       }
       prevNewCountRef.current = newCnt;
       setTickets(list);
+    } catch {
+      // Ignore transient error
     } finally {
       setLoading(false);
     }
@@ -90,7 +93,7 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
   });
 
   async function updateTicketStatus(ticketId: number, status: 'accepted' | 'preparing' | 'ready' | 'served' | 'rejected', reason?: string) {
-    const resp = await fetch(`/api/kitchen/tickets/${ticketId}/status`, {
+    const resp = await apiFetch(`/api/kitchen/tickets/${ticketId}/status`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { QrCode, X } from 'lucide-react';
 import type { MenuCategory, MenuItem, RestaurantInfo } from './types.ts';
+import { apiFetch, parseJsonSafe } from './lib/api.ts';
 import { useRealtimeRoom } from './lib/ws.ts';
 import { PublicFooter, PublicNavbar, type PublicPageSlug } from './components/ui.tsx';
 import { PublicWebsite } from './pages/PublicWebsite.tsx';
@@ -28,15 +29,18 @@ export default function App() {
 
   const loadPublicCatalog = useCallback(async () => {
     try {
-      const [rRes, mRes] = await Promise.all([fetch('/api/restaurant'), fetch('/api/menu')]);
-      if (rRes.ok) setRestaurant(await rRes.json());
+      const [rRes, mRes] = await Promise.all([apiFetch('/api/restaurant'), apiFetch('/api/menu')]);
+      if (rRes.ok) {
+        const rd = await parseJsonSafe<RestaurantInfo>(rRes);
+        if (rd && rd.name) setRestaurant(rd);
+      }
       if (mRes.ok) {
-        const md = await mRes.json();
+        const md = await parseJsonSafe<{ categories?: MenuCategory[]; items?: MenuItem[] }>(mRes);
         setCategories(md.categories || []);
         setItems(md.items || []);
       }
     } catch {
-      // Ignore transient network errors
+      // Ignore transient network or static-preview non-JSON errors
     }
   }, []);
 

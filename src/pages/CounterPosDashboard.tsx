@@ -17,6 +17,7 @@ import type {
   PaymentRecord,
   RestaurantInfo,
 } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { downloadInvoicePdf, formatDateTimeIST, formatINR } from '../lib/format.ts';
 import { useRealtimeRoom } from '../lib/ws.ts';
 import { ConfirmModal, StatusLabel } from '../components/ui.tsx';
@@ -64,27 +65,35 @@ export function CounterPosDashboard({
   const [lastInvoice, setLastInvoice] = useState<InvoiceRecord | null>(null);
 
   const loadAll = useCallback(async () => {
-    const [tRes, oRes, iRes] = await Promise.all([
-      fetch('/api/pos/tables', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/pos/orders', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/pos/invoices', { headers: { Authorization: `Bearer ${staffToken}` } }),
-    ]);
-    if (tRes.ok) setTables((await tRes.json()).tables || []);
-    if (oRes.ok) setOrders((await oRes.json()).orders || []);
-    if (iRes.ok) setInvoices((await iRes.json()).invoices || []);
+    try {
+      const [tRes, oRes, iRes] = await Promise.all([
+        apiFetch('/api/pos/tables', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/pos/orders', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/pos/invoices', { headers: { Authorization: `Bearer ${staffToken}` } }),
+      ]);
+      if (tRes.ok) setTables((await parseJsonSafe<{ tables?: DiningTable[] }>(tRes)).tables || []);
+      if (oRes.ok) setOrders((await parseJsonSafe<{ orders?: Order[] }>(oRes)).orders || []);
+      if (iRes.ok) setInvoices((await parseJsonSafe<{ invoices?: InvoiceRecord[] }>(iRes)).invoices || []);
+    } catch {
+      // Ignore transient error
+    }
   }, [staffToken]);
 
   const loadTableBill = useCallback(
     async (tableId: number) => {
-      const resp = await fetch(`/api/pos/tables/${tableId}/bill`, {
-        headers: { Authorization: `Bearer ${staffToken}` },
-      });
-      if (resp.ok) {
-        const data: TableBillData = await resp.json();
-        setBillData(data);
-        if (data.totals) {
-          setPayAmountRupees(String(Math.round(data.totals.outstanding_paise / 100)));
+      try {
+        const resp = await apiFetch(`/api/pos/tables/${tableId}/bill`, {
+          headers: { Authorization: `Bearer ${staffToken}` },
+        });
+        if (resp.ok) {
+          const data = await parseJsonSafe<TableBillData>(resp);
+          setBillData(data);
+          if (data.totals) {
+            setPayAmountRupees(String(Math.round(data.totals.outstanding_paise / 100)));
+          }
         }
+      } catch {
+        // Ignore transient error
       }
     },
     [staffToken]
@@ -120,101 +129,121 @@ export function CounterPosDashboard({
       setPosMessage({ type: 'err', text: 'Enter a valid payment amount in INR.' });
       return;
     }
-    const resp = await fetch('/api/pos/payments/record', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${staffToken}`,
-      },
-      body: JSON.stringify({
-        table_id: selectedTableId,
-        amount_paise: amountPaise,
-        method: payMethod,
-        confirm_received: confirmReceipt,
-      }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      setPosMessage({ type: 'err', text: data.error || 'Failed to record payment' });
-      return;
+    try {
+      const resp = await apiFetch('/api/pos/payments/record', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${staffToken}`,
+        },
+        body: JSON.stringify({
+          table_id: selectedTableId,
+          amount_paise: amountPaise,
+          method: payMethod,
+          confirm_received: confirmReceipt,
+        }),
+      });
+      const data = await parseJsonSafe<{ error?: string }>(resp);
+      if (!resp.ok) {
+        setPosMessage({ type: 'err', text: data.error || 'Failed to record payment' });
+        return;
+      }
+      setPosMessage({ type: 'ok', text: `Payment of ${formatINR(amountPaise)} recorded via ${payMethod.toUpperCase()}.` });
+      setConfirmReceipt(false);
+      await Promise.all([loadAll(), loadTableBill(selectedTableId)]);
+    } catch (err: unknown) {
+      setPosMessage({ type: 'err', text: err instanceof Error ? err.message : 'Failed to record payment' });
     }
-    setPosMessage({ type: 'ok', text: `Payment of ${formatINR(amountPaise)} recorded via ${payMethod.toUpperCase()}.` });
-    setConfirmReceipt(false);
-    await Promise.all([loadAll(), loadTableBill(selectedTableId)]);
   }
 
   async function cancelOrderItem(itemId: number) {
     if (!selectedTableId) return;
-    const resp = await fetch(`/api/pos/orders/${itemId}/cancel-item`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${staffToken}`,
-      },
-      body: JSON.stringify({ reason: 'Cancelled by Counter POS staff' }),
-    });
-    if (resp.ok) {
-      setPosMessage({ type: 'ok', text: 'Item cancelled and consolidated bill recalculated.' });
-      await Promise.all([loadAll(), loadTableBill(selectedTableId)]);
+    try {
+      const resp = await apiFetch(`/api/pos/orders/${itemId}/cancel-item`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${staffToken}`,
+        },
+        body: JSON.stringify({ reason: 'Cancelled by Counter POS staff' }),
+      });
+      if (resp.ok) {
+        setPosMessage({ type: 'ok', text: 'Item cancelled and consolidated bill recalculated.' });
+        await Promise.all([loadAll(), loadTableBill(selectedTableId)]);
+      }
+    } catch (err: unknown) {
+      setPosMessage({ type: 'err', text: err instanceof Error ? err.message : 'Could not cancel item' });
     }
   }
 
   async function refundPayment(paymentId: number, amountPaise: number) {
     if (!selectedTableId) return;
-    const resp = await fetch('/api/pos/refunds', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${staffToken}`,
-      },
-      body: JSON.stringify({
-        payment_id: paymentId,
-        amount_paise: amountPaise,
-        reason: 'Counter staff authorized refund',
-      }),
-    });
-    if (resp.ok) {
-      setPosMessage({ type: 'ok', text: `Refund of ${formatINR(amountPaise)} processed.` });
-      await Promise.all([loadAll(), loadTableBill(selectedTableId)]);
+    try {
+      const resp = await apiFetch('/api/pos/refunds', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${staffToken}`,
+        },
+        body: JSON.stringify({
+          payment_id: paymentId,
+          amount_paise: amountPaise,
+          reason: 'Counter staff authorized refund',
+        }),
+      });
+      if (resp.ok) {
+        setPosMessage({ type: 'ok', text: `Refund of ${formatINR(amountPaise)} processed.` });
+        await Promise.all([loadAll(), loadTableBill(selectedTableId)]);
+      }
+    } catch (err: unknown) {
+      setPosMessage({ type: 'err', text: err instanceof Error ? err.message : 'Refund failed' });
     }
   }
 
   async function transferTable() {
     if (!selectedTableId || !transferTargetId) return;
-    const resp = await fetch(`/api/pos/tables/${selectedTableId}/transfer`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${staffToken}`,
-      },
-      body: JSON.stringify({ target_table_id: Number(transferTargetId) }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      setPosMessage({ type: 'err', text: data.error || 'Transfer failed' });
-      return;
+    try {
+      const resp = await apiFetch(`/api/pos/tables/${selectedTableId}/transfer`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${staffToken}`,
+        },
+        body: JSON.stringify({ target_table_id: Number(transferTargetId) }),
+      });
+      const data = await parseJsonSafe<{ error?: string }>(resp);
+      if (!resp.ok) {
+        setPosMessage({ type: 'err', text: data.error || 'Transfer failed' });
+        return;
+      }
+      const targetNum = Number(transferTargetId);
+      setTransferTargetId('');
+      await loadAll();
+      openTableDrawer(targetNum);
+    } catch (err: unknown) {
+      setPosMessage({ type: 'err', text: err instanceof Error ? err.message : 'Transfer failed' });
     }
-    const targetNum = Number(transferTargetId);
-    setTransferTargetId('');
-    await loadAll();
-    openTableDrawer(targetNum);
   }
 
   async function closeTableSession() {
     if (!selectedTableId) return;
     setCloseConfirmOpen(false);
-    const resp = await fetch(`/api/pos/tables/${selectedTableId}/close`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${staffToken}` },
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      setPosMessage({ type: 'err', text: data.error || 'Could not close session' });
-      return;
+    try {
+      const resp = await apiFetch(`/api/pos/tables/${selectedTableId}/close`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${staffToken}` },
+      });
+      const data = await parseJsonSafe<{ invoice: InvoiceRecord; error?: string }>(resp);
+      if (!resp.ok) {
+        setPosMessage({ type: 'err', text: data.error || 'Could not close session' });
+        return;
+      }
+      setLastInvoice(data.invoice);
+      setPosMessage({ type: 'ok', text: `Table settled! Invoice ${data.invoice.invoice_number} generated.` });
+      await loadAll();
+    } catch (err: unknown) {
+      setPosMessage({ type: 'err', text: err instanceof Error ? err.message : 'Could not close session' });
     }
-    setLastInvoice(data.invoice);
-    setPosMessage({ type: 'ok', text: `Table settled! Invoice ${data.invoice.invoice_number} generated.` });
-    await loadAll();
   }
 
   const filteredTables = tables.filter(

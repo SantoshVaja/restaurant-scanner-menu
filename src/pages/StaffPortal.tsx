@@ -19,6 +19,7 @@ import type {
   RoleSlug,
   StaffUser,
 } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { formatDateTimeIST } from '../lib/format.ts';
 import { KitchenDashboard } from './KitchenDashboard.tsx';
 import { CounterPosDashboard } from './CounterPosDashboard.tsx';
@@ -83,8 +84,8 @@ export function StaffPortal({
   const [notifOpen, setNotifOpen] = useState(false);
 
   useEffect(() => {
-    fetch('/api/auth/demo-accounts')
-      .then((r) => (r.ok ? r.json() : null))
+    apiFetch('/api/auth/demo-accounts')
+      .then((r) => (r.ok ? parseJsonSafe<{ accounts?: DemoCredential[] }>(r) : null))
       .then((d) => {
         if (d?.accounts) setDemoAccounts(d.accounts);
       })
@@ -92,12 +93,16 @@ export function StaffPortal({
   }, []);
 
   const loadNotifications = useCallback(async (tok: string) => {
-    const resp = await fetch('/api/notifications', {
-      headers: { Authorization: `Bearer ${tok}` },
-    });
-    if (resp.ok) {
-      const d = await resp.json();
-      setNotifications(d.notifications || []);
+    try {
+      const resp = await apiFetch('/api/notifications', {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (resp.ok) {
+        const d = await parseJsonSafe<{ notifications?: AppNotification[] }>(resp);
+        setNotifications(d.notifications || []);
+      }
+    } catch {
+      // Ignore transient refresh failure
     }
   }, []);
 
@@ -111,12 +116,12 @@ export function StaffPortal({
     setLoggingIn(true);
     setLoginError(null);
     try {
-      const resp = await fetch('/api/auth/login', {
+      const resp = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: loginEmail, password: loginPass }),
       });
-      const data = await resp.json();
+      const data = await parseJsonSafe<{ token: string; user: StaffUser; error?: string }>(resp);
       if (!resp.ok) throw new Error(data.error || 'Login failed');
       setStaffToken(data.token);
       setStaffUser(data.user);
@@ -130,10 +135,14 @@ export function StaffPortal({
 
   async function handleLogout() {
     if (staffToken) {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${staffToken}` },
-      });
+      try {
+        await apiFetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${staffToken}` },
+        });
+      } catch {
+        // Proceed with local sign-out even if request fails
+      }
     }
     setStaffToken(null);
     setStaffUser(null);
@@ -143,11 +152,15 @@ export function StaffPortal({
 
   async function markNotificationsRead() {
     if (!staffToken) return;
-    await fetch('/api/notifications/read', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${staffToken}` },
-    });
-    loadNotifications(staffToken);
+    try {
+      await apiFetch('/api/notifications/read', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${staffToken}` },
+      });
+      loadNotifications(staffToken);
+    } catch {
+      // Ignore
+    }
   }
 
   // ==================== STAFF LOGIN SCREEN ====================

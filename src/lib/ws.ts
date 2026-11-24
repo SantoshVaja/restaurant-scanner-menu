@@ -22,8 +22,18 @@ export function useRealtimeRoom({ room, staffToken, tableToken, onEvent }: UseRe
 
     function connect() {
       if (!active) return;
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${window.location.host}/ws`;
+      const env = (import.meta as { env?: Record<string, string | undefined> }).env;
+      const customWs = env?.VITE_WS_BASE_URL?.replace(/\/+$/, '');
+      const customApi = env?.VITE_API_BASE_URL?.replace(/\/+$/, '');
+      let url = '';
+      if (customWs) {
+        url = `${customWs}/ws`;
+      } else if (customApi && /^https?:\/\//i.test(customApi)) {
+        url = `${customApi.replace(/^http/i, 'ws')}/ws`;
+      } else {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        url = `${proto}//${window.location.host}/ws`;
+      }
       ws = new WebSocket(url);
 
       ws.onopen = () => {

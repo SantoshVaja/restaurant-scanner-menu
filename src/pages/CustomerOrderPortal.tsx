@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertCircle,
   Bell,
@@ -17,6 +18,7 @@ import {
   Sparkles,
   Tag,
   Trash2,
+  Utensils,
   X,
 } from 'lucide-react';
 import type {
@@ -27,6 +29,7 @@ import type {
   Order,
   RestaurantInfo,
 } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { formatDateTimeIST, formatINR } from '../lib/format.ts';
 import { useRealtimeRoom } from '../lib/ws.ts';
 import { SafeImage, StatusLabel, VegIndicator } from '../components/ui.tsx';
@@ -124,19 +127,103 @@ export function CustomerOrderPortal({
   } | null>(null);
   const [waiterBanner, setWaiterBanner] = useState<string | null>(null);
 
-  const fetchSessionState = useCallback(async (tok: string, tblNum: number) => {
-    try {
-      const resp = await fetch(`/api/table-session/current?table=${tblNum}`, {
-        headers: { 'X-Table-Session-Token': tok },
-      });
-      if (!resp.ok) return;
-      const data = await resp.json();
-      setSessionOrders(data.orders || []);
-      setSessionTotals(data.totals || null);
-    } catch {
-      // Ignore transient refresh failure
-    }
+  // Ready Order Toast Notifications
+  const [readyToasts, setReadyToasts] = useState<
+    Array<{ id: string; orderId: number; orderNumber: string; message: string }>
+  >([]);
+  const prevOrderStatusesRef = useRef<Map<number, string>>(new Map());
+  const notifiedReadyIdsRef = useRef<Set<number>>(new Set());
+  const initialOrdersLoadedRef = useRef(false);
+
+  const dismissReadyToast = useCallback((toastId: string) => {
+    setReadyToasts((prev) => prev.filter((t) => t.id !== toastId));
   }, []);
+
+  const triggerReadyToast = useCallback((orderId: number, orderNumber?: string) => {
+    if (!orderId || notifiedReadyIdsRef.current.has(orderId)) return;
+    notifiedReadyIdsRef.current.add(orderId);
+
+    const toastId = `ready-${orderId}-${Date.now()}`;
+    const label = orderNumber ? `Order ${orderNumber}` : `Order #${orderId}`;
+    setReadyToasts((prev) => [
+      ...prev.slice(-2),
+      {
+        id: toastId,
+        orderId,
+        orderNumber: orderNumber || `#${orderId}`,
+        message: `${label} is freshly plated and ready for service.`,
+      },
+    ]);
+
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        navigator.vibrate([100, 50, 120]);
+      }
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.14);
+        gain.gain.setValueAtTime(0.08, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.45);
+      }
+    } catch {
+      // Ignore audio/vibration blocks on autoplay-restricted devices
+    }
+
+    window.setTimeout(() => {
+      setReadyToasts((prev) => prev.filter((t) => t.id !== toastId));
+    }, 9000);
+  }, []);
+
+  const fetchSessionState = useCallback(
+    async (tok: string, tblNum: number) => {
+      try {
+        const resp = await apiFetch(`/api/table-session/current?table=${tblNum}`, {
+          headers: { 'X-Table-Session-Token': tok },
+        });
+        if (!resp.ok) return;
+        const data = await parseJsonSafe<{
+          orders?: Order[];
+          totals?: typeof sessionTotals;
+        }>(resp);
+        const nextOrders = data.orders || [];
+
+        if (!initialOrdersLoadedRef.current) {
+          initialOrdersLoadedRef.current = true;
+          for (const ord of nextOrders) {
+            prevOrderStatusesRef.current.set(ord.id, ord.status);
+            if (ord.status === 'ready') {
+              notifiedReadyIdsRef.current.add(ord.id);
+            }
+          }
+        } else {
+          for (const ord of nextOrders) {
+            const prevStatus = prevOrderStatusesRef.current.get(ord.id);
+            if (ord.status === 'ready' && prevStatus !== 'ready') {
+              triggerReadyToast(ord.id, ord.order_number);
+            }
+            prevOrderStatusesRef.current.set(ord.id, ord.status);
+          }
+        }
+
+        setSessionOrders(nextOrders);
+        setSessionTotals(data.totals || null);
+      } catch {
+        // Ignore transient refresh failure
+      }
+    },
+    [triggerReadyToast]
+  );
 
   // Validate QR from URL on mount
   useEffect(() => {
@@ -152,19 +239,26 @@ export function CustomerOrderPortal({
 
     (async () => {
       try {
-        const resp = await fetch('/api/qr/validate', {
+        const resp = await apiFetch('/api/qr/validate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ table: Number(tableParam), token: tokenParam }),
         });
-        const data = await resp.json();
+        const data = await parseJsonSafe<{
+          table: typeof tableInfo;
+          session: typeof sessionInfo;
+          customer_token: string;
+          error?: string;
+        }>(resp);
         if (!resp.ok) {
           throw new Error(data.error || 'QR validation failed.');
         }
         setTableInfo(data.table);
         setSessionInfo(data.session);
         setCustomerToken(data.customer_token);
-        await fetchSessionState(data.customer_token, data.table.table_number);
+        if (data.table) {
+          await fetchSessionState(data.customer_token, data.table.table_number);
+        }
       } catch (err: unknown) {
         setQrError(err instanceof Error ? err.message : 'Unable to verify table QR.');
       } finally {
@@ -177,7 +271,23 @@ export function CustomerOrderPortal({
   const { connected: wsConnected } = useRealtimeRoom({
     room: sessionInfo ? `table:${sessionInfo.id}` : null,
     tableToken: customerToken,
-    onEvent: (eventName) => {
+    onEvent: (eventName, payload) => {
+      if (eventName === 'sync:update' && payload && typeof payload === 'object') {
+        const p = payload as {
+          type?: string;
+          orderId?: number;
+          orderNumber?: string;
+          status?: string;
+          orderStatus?: string;
+        };
+        if (
+          p.type === 'kitchen_status_changed' &&
+          (p.status === 'ready' || p.orderStatus === 'ready') &&
+          typeof p.orderId === 'number'
+        ) {
+          triggerReadyToast(p.orderId, p.orderNumber);
+        }
+      }
       if (customerToken && tableInfo && (eventName === 'sync:update' || eventName === 'menu:updated')) {
         fetchSessionState(customerToken, tableInfo.table_number);
       }
@@ -273,12 +383,12 @@ export function CustomerOrderPortal({
     setCouponFeedback(null);
     if (!couponInput.trim()) return;
     try {
-      const resp = await fetch('/api/coupons/validate', {
+      const resp = await apiFetch('/api/coupons/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: couponInput.trim(), subtotal_paise: cartSummary.subtotal }),
       });
-      const data = await resp.json();
+      const data = await parseJsonSafe<{ coupon: { code: string }; discount_paise: number; error?: string }>(resp);
       if (!resp.ok) throw new Error(data.error || 'Coupon invalid');
       setAppliedCoupon({ code: data.coupon.code, discount_paise: data.discount_paise });
       setCouponFeedback(`Applied ${data.coupon.code}: -${formatINR(data.discount_paise)}`);
@@ -293,7 +403,7 @@ export function CustomerOrderPortal({
     setSubmittingCheckout(true);
     setCheckoutError(null);
     try {
-      const resp = await fetch('/api/orders/checkout', {
+      const resp = await apiFetch('/api/orders/checkout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -313,7 +423,11 @@ export function CustomerOrderPortal({
           })),
         }),
       });
-      const data = await resp.json();
+      const data = await parseJsonSafe<{
+        order: Order;
+        payment_order: { provider_order_id: string; amount_paise: number; is_sandbox_demo: boolean };
+        error?: string;
+      }>(resp);
       if (!resp.ok) throw new Error(data.error || 'Checkout failed');
 
       setPendingPayment({
@@ -337,7 +451,7 @@ export function CustomerOrderPortal({
     setPayingBusy(true);
     setPaymentMessage(null);
     try {
-      const authResp = await fetch('/api/payments/sandbox-authorize', {
+      const authResp = await apiFetch('/api/payments/sandbox-authorize', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -348,10 +462,15 @@ export function CustomerOrderPortal({
           method: payMethod,
         }),
       });
-      const authData = await authResp.json();
+      const authData = await parseJsonSafe<{
+        razorpay_order_id: string;
+        razorpay_payment_id: string;
+        razorpay_signature: string;
+        error?: string;
+      }>(authResp);
       if (!authResp.ok) throw new Error(authData.error || 'Gateway authorization failed');
 
-      const verResp = await fetch('/api/payments/verify', {
+      const verResp = await apiFetch('/api/payments/verify', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -364,7 +483,7 @@ export function CustomerOrderPortal({
           method: payMethod,
         }),
       });
-      const verData = await verResp.json();
+      const verData = await parseJsonSafe<{ error?: string }>(verResp);
       if (!verResp.ok) throw new Error(verData.error || 'Payment verification failed');
 
       setCart([]);
@@ -390,7 +509,7 @@ export function CustomerOrderPortal({
     setPayingBusy(true);
     try {
       const reason = outcome === 'failed' ? 'Bank declined transaction (Sandbox Simulation)' : 'Customer cancelled payment';
-      await fetch('/api/payments/mark-failed', {
+      await apiFetch('/api/payments/mark-failed', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -403,6 +522,8 @@ export function CustomerOrderPortal({
       });
       setPaymentMessage({ type: 'error', text: `${reason}. Kitchen ticket was NOT released. You may retry checkout.` });
       await fetchSessionState(customerToken, tableInfo.table_number);
+    } catch (err: unknown) {
+      setPaymentMessage({ type: 'error', text: err instanceof Error ? err.message : 'Gateway error' });
     } finally {
       setPayingBusy(false);
     }
@@ -410,17 +531,21 @@ export function CustomerOrderPortal({
 
   async function callWaiter() {
     if (!customerToken) return;
-    const resp = await fetch('/api/table-session/call-waiter', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Table-Session-Token': customerToken,
-      },
-      body: JSON.stringify({ note: 'Guest requested assistance via QR menu' }),
-    });
-    if (resp.ok) {
-      setWaiterBanner('Your waiter has been notified and is on the way.');
-      window.setTimeout(() => setWaiterBanner(null), 5000);
+    try {
+      const resp = await apiFetch('/api/table-session/call-waiter', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Table-Session-Token': customerToken,
+        },
+        body: JSON.stringify({ note: 'Guest requested assistance via QR menu' }),
+      });
+      if (resp.ok) {
+        setWaiterBanner('Your waiter has been notified and is on the way.');
+        window.setTimeout(() => setWaiterBanner(null), 5000);
+      }
+    } catch {
+      // Ignore transient failure
     }
   }
 
@@ -1285,6 +1410,68 @@ export function CustomerOrderPortal({
           </div>
         </div>
       )}
+
+      {/* Real-Time Order Ready Toast Notifications */}
+      <div
+        aria-live="polite"
+        className="fixed top-16 right-4 left-4 sm:left-auto sm:w-96 z-50 flex flex-col gap-2.5 pointer-events-none"
+      >
+        <AnimatePresence>
+          {readyToasts.map((toast) => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, y: -16, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.96 }}
+              transition={{ duration: 0.2 }}
+              role="status"
+              className="pointer-events-auto bg-[#18181B] text-white border border-[#B47B2B]/60 rounded-xl shadow-2xl p-4 flex items-start gap-3"
+            >
+              <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-400/30 flex items-center justify-center shrink-0 mt-0.5">
+                <Utensils className="w-4 h-4 text-emerald-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                    Order Ready
+                  </p>
+                  <span className="font-mono text-[11px] text-zinc-400">{toast.orderNumber}</span>
+                </div>
+                <p className="text-sm font-medium text-white mt-0.5 leading-snug">
+                  {toast.message}
+                </p>
+                <div className="mt-2.5 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setViewMode('tracking');
+                      dismissReadyToast(toast.id);
+                    }}
+                    className="px-2.5 py-1 text-xs font-semibold bg-[#B47B2B] hover:bg-[#D4A359] text-white rounded transition-colors cursor-pointer"
+                  >
+                    Track Order
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => dismissReadyToast(toast.id)}
+                    className="text-xs text-zinc-400 hover:text-white cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Close notification"
+                onClick={() => dismissReadyToast(toast.id)}
+                className="text-zinc-400 hover:text-white p-0.5 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
     </div>
   );
 }

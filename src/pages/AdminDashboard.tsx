@@ -30,6 +30,7 @@ import type {
   RoleSlug,
   StaffUser,
 } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { downloadAllTableQrsPdf, exportRowsToCsv, formatDateTimeIST, formatINR } from '../lib/format.ts';
 import { useRealtimeRoom } from '../lib/ws.ts';
 import { ConfirmModal, StatusLabel, VegIndicator } from '../components/ui.tsx';
@@ -108,22 +109,26 @@ export function AdminDashboard({
   const authHeaders = { Authorization: `Bearer ${staffToken}`, 'Content-Type': 'application/json' };
 
   const loadTabData = useCallback(async () => {
-    const [ovRes, qrRes, stRes, cpRes, rsRes, rpRes, auRes] = await Promise.all([
-      fetch('/api/admin/overview', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/admin/tables/qrs', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/admin/staff', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/admin/coupons', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/admin/reservations', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/admin/reports', { headers: { Authorization: `Bearer ${staffToken}` } }),
-      fetch('/api/admin/audit-logs', { headers: { Authorization: `Bearer ${staffToken}` } }),
-    ]);
-    if (ovRes.ok) setOverview(await ovRes.json());
-    if (qrRes.ok) setQrTables((await qrRes.json()).tables || []);
-    if (stRes.ok) setStaffList((await stRes.json()).staff || []);
-    if (cpRes.ok) setCoupons((await cpRes.json()).coupons || []);
-    if (rsRes.ok) setReservations((await rsRes.json()).reservations || []);
-    if (rpRes.ok) setReports(await rpRes.json());
-    if (auRes.ok) setAuditLogs((await auRes.json()).logs || []);
+    try {
+      const [ovRes, qrRes, stRes, cpRes, rsRes, rpRes, auRes] = await Promise.all([
+        apiFetch('/api/admin/overview', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/admin/tables/qrs', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/admin/staff', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/admin/coupons', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/admin/reservations', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/admin/reports', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/admin/audit-logs', { headers: { Authorization: `Bearer ${staffToken}` } }),
+      ]);
+      if (ovRes.ok) setOverview(await parseJsonSafe(ovRes));
+      if (qrRes.ok) setQrTables((await parseJsonSafe(qrRes)).tables || []);
+      if (stRes.ok) setStaffList((await parseJsonSafe(stRes)).staff || []);
+      if (cpRes.ok) setCoupons((await parseJsonSafe(cpRes)).coupons || []);
+      if (rsRes.ok) setReservations((await parseJsonSafe(rsRes)).reservations || []);
+      if (rpRes.ok) setReports(await parseJsonSafe(rpRes));
+      if (auRes.ok) setAuditLogs((await parseJsonSafe(auRes)).logs || []);
+    } catch {
+      // Ignore transient error
+    }
   }, [staffToken]);
 
   useEffect(() => {
@@ -143,7 +148,7 @@ export function AdminDashboard({
 
   async function addMenuItem(e: React.FormEvent) {
     e.preventDefault();
-    const resp = await fetch('/api/admin/menu/items', {
+    const resp = await apiFetch('/api/admin/menu/items', {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
@@ -164,7 +169,7 @@ export function AdminDashboard({
   }
 
   async function toggleItemAvailability(item: MenuItem) {
-    await fetch(`/api/admin/menu/items/${item.id}`, {
+    await apiFetch(`/api/admin/menu/items/${item.id}`, {
       method: 'PUT',
       headers: authHeaders,
       body: JSON.stringify({ is_available: !item.is_available }),
@@ -175,7 +180,7 @@ export function AdminDashboard({
 
   async function updateItemPrice(item: MenuItem, newRupees: number) {
     if (!Number.isFinite(newRupees) || newRupees <= 0) return;
-    await fetch(`/api/admin/menu/items/${item.id}`, {
+    await apiFetch(`/api/admin/menu/items/${item.id}`, {
       method: 'PUT',
       headers: authHeaders,
       body: JSON.stringify({ price_inr: newRupees }),
@@ -185,7 +190,7 @@ export function AdminDashboard({
   }
 
   async function deleteMenuItem(item: MenuItem) {
-    await fetch(`/api/admin/menu/items/${item.id}`, {
+    await apiFetch(`/api/admin/menu/items/${item.id}`, {
       method: 'DELETE',
       headers: authHeaders,
     });
@@ -196,7 +201,7 @@ export function AdminDashboard({
   async function addCategory(e: React.FormEvent) {
     e.preventDefault();
     if (!newCatName.trim()) return;
-    const resp = await fetch('/api/admin/menu/categories', {
+    const resp = await apiFetch('/api/admin/menu/categories', {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({ name: newCatName.trim() }),
@@ -210,7 +215,7 @@ export function AdminDashboard({
 
   async function addTable(e: React.FormEvent) {
     e.preventDefault();
-    const resp = await fetch('/api/admin/tables', {
+    const resp = await apiFetch('/api/admin/tables', {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
@@ -227,7 +232,7 @@ export function AdminDashboard({
   }
 
   async function regenerateQr(tableId: number, tableNum: number) {
-    const resp = await fetch(`/api/admin/tables/${tableId}/regenerate-qr`, {
+    const resp = await apiFetch(`/api/admin/tables/${tableId}/regenerate-qr`, {
       method: 'POST',
       headers: authHeaders,
     });
@@ -239,23 +244,27 @@ export function AdminDashboard({
 
   async function createStaff(e: React.FormEvent) {
     e.preventDefault();
-    const resp = await fetch('/api/admin/staff', {
-      method: 'POST',
-      headers: authHeaders,
-      body: JSON.stringify(newStaff),
-    });
-    const data = await resp.json();
-    if (resp.ok) {
-      setNewStaff({ name: '', email: '', phone: '', password: '', role: 'waiter' });
-      loadTabData();
-      showNotice('Staff account created.');
-    } else {
-      showNotice(data.error || 'Could not create staff');
+    try {
+      const resp = await apiFetch('/api/admin/staff', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify(newStaff),
+      });
+      const data = await parseJsonSafe<{ error?: string }>(resp);
+      if (resp.ok) {
+        setNewStaff({ name: '', email: '', phone: '', password: '', role: 'waiter' });
+        loadTabData();
+        showNotice('Staff account created.');
+      } else {
+        showNotice(data.error || 'Could not create staff');
+      }
+    } catch (err: unknown) {
+      showNotice(err instanceof Error ? err.message : 'Could not create staff');
     }
   }
 
   async function toggleStaffActive(u: StaffUser) {
-    await fetch(`/api/admin/staff/${u.id}`, {
+    await apiFetch(`/api/admin/staff/${u.id}`, {
       method: 'PUT',
       headers: authHeaders,
       body: JSON.stringify({ is_active: !u.is_active }),
@@ -265,7 +274,7 @@ export function AdminDashboard({
 
   async function createCoupon(e: React.FormEvent) {
     e.preventDefault();
-    const resp = await fetch('/api/admin/coupons', {
+    const resp = await apiFetch('/api/admin/coupons', {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
@@ -282,7 +291,7 @@ export function AdminDashboard({
   }
 
   async function updateReservationStatus(id: number, status: string) {
-    await fetch(`/api/admin/reservations/${id}`, {
+    await apiFetch(`/api/admin/reservations/${id}`, {
       method: 'PUT',
       headers: authHeaders,
       body: JSON.stringify({ status }),
@@ -293,7 +302,7 @@ export function AdminDashboard({
 
   async function saveSettings(e: React.FormEvent) {
     e.preventDefault();
-    await fetch('/api/admin/settings', {
+    await apiFetch('/api/admin/settings', {
       method: 'PUT',
       headers: authHeaders,
       body: JSON.stringify({
@@ -308,7 +317,7 @@ export function AdminDashboard({
 
   async function handleDemoReset() {
     setResetConfirmOpen(false);
-    const resp = await fetch('/api/admin/demo/reset', {
+    const resp = await apiFetch('/api/admin/demo/reset', {
       method: 'POST',
       headers: authHeaders,
     });

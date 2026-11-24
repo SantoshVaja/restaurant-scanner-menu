@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import type { MenuCategory, MenuItem, RestaurantInfo } from '../types.ts';
+import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { formatINR } from '../lib/format.ts';
 import { SafeImage, VegIndicator, type PublicPageSlug } from '../components/ui.tsx';
 
@@ -111,12 +112,12 @@ export function PublicWebsite({
     setResError(null);
     setResResult(null);
     try {
-      const resp = await fetch('/api/reservations', {
+      const resp = await apiFetch('/api/reservations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(resForm),
       });
-      const data = await resp.json();
+      const data = await parseJsonSafe<{ reservation_code: string; message: string; error?: string }>(resp);
       if (!resp.ok) throw new Error(data.error || 'Could not submit reservation');
       setResResult({ code: data.reservation_code, message: data.message });
     } catch (err: unknown) {
@@ -132,12 +133,12 @@ export function PublicWebsite({
     setContactError(null);
     setContactSuccess(null);
     try {
-      const resp = await fetch('/api/contact', {
+      const resp = await apiFetch('/api/contact', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(contactForm),
       });
-      const data = await resp.json();
+      const data = await parseJsonSafe<{ message: string; error?: string }>(resp);
       if (!resp.ok) throw new Error(data.error || 'Could not send message');
       setContactSuccess(data.message);
       setContactForm({ name: '', email: '', phone: '', message: '' });
