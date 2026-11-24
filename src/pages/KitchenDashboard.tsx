@@ -38,7 +38,23 @@ function playChime() {
   }
 }
 
-export function KitchenDashboard({ staffToken }: { staffToken: string }) {
+export interface KitchenCounts {
+  active: number;
+  new: number;
+  accepted: number;
+  preparing: number;
+  ready: number;
+  served: number;
+  rejected: number;
+}
+
+export function KitchenDashboard({
+  staffToken,
+  onCountsChange,
+}: {
+  staffToken: string;
+  onCountsChange?: (counts: KitchenCounts) => void;
+}) {
   const [tickets, setTickets] = useState<KitchenTicket[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'active' | 'new' | 'accepted' | 'preparing' | 'ready' | 'served' | 'rejected'>('active');
@@ -48,7 +64,28 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
   const [rejectModalTicket, setRejectModalTicket] = useState<KitchenTicket | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [nowTick, setNowTick] = useState(Date.now());
-  const prevNewCountRef = useRef<number>(0);
+  const [freshTicketIds, setFreshTicketIds] = useState<Set<number>>(new Set());
+  const [recentlyAcceptedIds, setRecentlyAcceptedIds] = useState<Set<number>>(new Set());
+  const [updatingTicketId, setUpdatingTicketId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const hasLoadedOnceRef = useRef(false);
+  const seenTicketIdsRef = useRef<Set<number>>(new Set());
+  const prevStatusByIdRef = useRef<Map<number, string>>(new Map());
+
+  const markRecentlyAccepted = useCallback((ticketId: number) => {
+    setRecentlyAcceptedIds((prev) => {
+      const next = new Set(prev);
+      next.add(ticketId);
+      return next;
+    });
+    window.setTimeout(() => {
+      setRecentlyAcceptedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(ticketId);
+        return next;
+      });
+    }, 12000);
+  }, []);
 
   const loadTickets = useCallback(async () => {
     try {
@@ -58,23 +95,54 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
       if (!resp.ok) return;
       const data = await parseJsonSafe<{ tickets?: KitchenTicket[] }>(resp);
       const list: KitchenTicket[] = data.tickets || [];
-      const newCnt = list.filter((t) => t.status === 'new').length;
-      if (newCnt > prevNewCountRef.current && prevNewCountRef.current >= 0) {
-        if (soundEnabled) playChime();
-        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-          new Notification('New Kitchen Order Ticket', {
-            body: `${newCnt} incoming order(s) waiting in Kitchen Display.`,
+
+      if (!hasLoadedOnceRef.current) {
+        hasLoadedOnceRef.current = true;
+        for (const t of list) {
+          seenTicketIdsRef.current.add(t.id);
+          prevStatusByIdRef.current.set(t.id, t.status);
+        }
+      } else {
+        const newlyArrived = list.filter((t) => t.status === 'new' && !seenTicketIdsRef.current.has(t.id));
+        for (const t of list) {
+          seenTicketIdsRef.current.add(t.id);
+          const prevStatus = prevStatusByIdRef.current.get(t.id);
+          if (t.status === 'accepted' && prevStatus !== 'accepted') {
+            markRecentlyAccepted(t.id);
+          }
+          prevStatusByIdRef.current.set(t.id, t.status);
+        }
+        if (newlyArrived.length > 0) {
+          if (soundEnabled) playChime();
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            const first = newlyArrived[0];
+            new Notification('New Kitchen Order Ticket', {
+              body: `Table ${String(first.table_number).padStart(2, '0')} (${first.ticket_number}) arrived in Kitchen Display.`,
+            });
+          }
+          const arrivedIds = newlyArrived.map((t) => t.id);
+          setFreshTicketIds((prev) => {
+            const next = new Set(prev);
+            for (const id of arrivedIds) next.add(id);
+            return next;
           });
+          window.setTimeout(() => {
+            setFreshTicketIds((prev) => {
+              const next = new Set(prev);
+              for (const id of arrivedIds) next.delete(id);
+              return next;
+            });
+          }, 15000);
         }
       }
-      prevNewCountRef.current = newCnt;
+
       setTickets(list);
     } catch {
       // Ignore transient error
     } finally {
       setLoading(false);
     }
-  }, [staffToken, soundEnabled]);
+  }, [staffToken, soundEnabled, markRecentlyAccepted]);
 
   useEffect(() => {
     loadTickets();
@@ -85,26 +153,71 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
   const { connected: wsConnected } = useRealtimeRoom({
     room: 'role:kitchen',
     staffToken,
-    onEvent: (evt) => {
-      if (evt === 'sync:update' || evt === 'notification:new') {
+    onEvent: (evt, payload) => {
+      if (evt === 'kitchen:ticket_updated' || evt === 'sync:update') {
+        if (payload && typeof payload === 'object') {
+          const p = payload as {
+            type?: string;
+            ticketId?: number;
+            status?: KitchenTicket['status'];
+            acceptedByName?: string;
+            ticket?: KitchenTicket;
+          };
+          if (p.type === 'kitchen_status_changed' && typeof p.ticketId === 'number' && p.status) {
+            if (p.status === 'accepted') {
+              markRecentlyAccepted(p.ticketId);
+            }
+            prevStatusByIdRef.current.set(p.ticketId, p.status);
+            setTickets((prev) =>
+              prev.map((t) => {
+                if (t.id !== p.ticketId) return t;
+                if (p.ticket) return p.ticket;
+                return {
+                  ...t,
+                  status: p.status!,
+                  accepted_by_name: p.acceptedByName ?? t.accepted_by_name,
+                };
+              })
+            );
+          }
+        }
+        loadTickets();
+      } else if (evt === 'notification:new') {
         loadTickets();
       }
     },
   });
 
   async function updateTicketStatus(ticketId: number, status: 'accepted' | 'preparing' | 'ready' | 'served' | 'rejected', reason?: string) {
-    const resp = await apiFetch(`/api/kitchen/tickets/${ticketId}/status`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${staffToken}`,
-      },
-      body: JSON.stringify({ status, reason }),
-    });
-    if (resp.ok) {
+    setUpdatingTicketId(ticketId);
+    setActionError(null);
+    try {
+      const resp = await apiFetch(`/api/kitchen/tickets/${ticketId}/status`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${staffToken}`,
+        },
+        body: JSON.stringify({ status, reason }),
+      });
+      const data = await parseJsonSafe<{ ok?: boolean; ticket?: KitchenTicket; error?: string }>(resp);
+      if (!resp.ok) {
+        throw new Error(data.error || 'Could not update ticket status');
+      }
+      if (status === 'accepted') {
+        markRecentlyAccepted(ticketId);
+      }
+      prevStatusByIdRef.current.set(ticketId, status);
+      if (data.ticket) {
+        setTickets((prev) => prev.map((t) => (t.id === ticketId ? data.ticket! : t)));
+      }
       setRejectModalTicket(null);
       setRejectReason('');
       await loadTickets();
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Unable to update ticket status');
+    } finally {
+      setUpdatingTicketId(null);
     }
   }
 
@@ -134,15 +247,24 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
     return list;
   }, [tickets, filter, search, nowTick]);
 
-  const counts = useMemo(
+  const counts: KitchenCounts = useMemo(
     () => ({
+      active: tickets.filter((t) => ['new', 'accepted', 'preparing', 'ready'].includes(t.status)).length,
       new: tickets.filter((t) => t.status === 'new').length,
       accepted: tickets.filter((t) => t.status === 'accepted').length,
       preparing: tickets.filter((t) => t.status === 'preparing').length,
       ready: tickets.filter((t) => t.status === 'ready').length,
+      served: tickets.filter((t) => t.status === 'served').length,
+      rejected: tickets.filter((t) => t.status === 'rejected').length,
     }),
     [tickets]
   );
+
+  useEffect(() => {
+    onCountsChange?.(counts);
+  }, [counts, onCountsChange]);
+
+  const newTickets = useMemo(() => tickets.filter((t) => t.status === 'new'), [tickets]);
 
   return (
     <div className={fullScreen ? 'fixed inset-0 z-50 bg-slate-950 text-white overflow-y-auto p-4 sm:p-6' : 'space-y-6'}>
@@ -159,7 +281,7 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
             </span>
           </div>
           <p className={`text-xs mt-1 ${fullScreen ? 'text-slate-400' : 'text-zinc-500'}`}>
-            {counts.new} New · {counts.accepted} Accepted · {counts.preparing} Preparing · {counts.ready} Ready to Serve
+            {counts.new} New · {counts.accepted} Accepted · {counts.preparing} Preparing · {counts.ready} Ready · {counts.served} Served
           </p>
         </div>
 
@@ -213,34 +335,92 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
         </div>
       </div>
 
+      {/* Prominent Incoming New Order Highlight Banner */}
+      {counts.new > 0 && (
+        <div
+          role="alert"
+          className={`rounded-xl border-2 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+            fullScreen
+              ? 'bg-amber-950/50 border-amber-400 text-amber-100'
+              : 'bg-amber-50 border-amber-500 text-amber-950 shadow-sm'
+          }`}
+        >
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-amber-500 text-white flex items-center justify-center shrink-0">
+              <Bell className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wider text-amber-700 dark:text-amber-300">
+                Incoming Kitchen Alert · {counts.new} New {counts.new === 1 ? 'Order' : 'Orders'} Waiting
+              </p>
+              <p className="text-xs mt-0.5 font-medium">
+                {newTickets
+                  .slice(0, 4)
+                  .map((t) => `Table ${String(t.table_number).padStart(2, '0')} (${t.ticket_number})`)
+                  .join(' · ')}
+                {newTickets.length > 4 ? ` +${newTickets.length - 4} more` : ''}
+              </p>
+            </div>
+          </div>
+          {filter !== 'new' && filter !== 'active' && (
+            <button
+              type="button"
+              onClick={() => setFilter('new')}
+              className="px-3.5 py-2 text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white rounded-md whitespace-nowrap cursor-pointer shrink-0"
+            >
+              View New Orders ({counts.new})
+            </button>
+          )}
+        </div>
+      )}
+
+      {actionError && (
+        <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg flex items-center justify-between gap-2">
+          <span>{actionError}</span>
+          <button type="button" onClick={() => setActionError(null)} className="font-semibold hover:underline cursor-pointer">
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Status Filter Tabs */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
         {(
           [
-            ['active', 'Active Queue'],
+            ['active', `Active Queue (${counts.active})`],
             ['new', `New (${counts.new})`],
             ['accepted', `Accepted (${counts.accepted})`],
             ['preparing', `Preparing (${counts.preparing})`],
             ['ready', `Ready (${counts.ready})`],
-            ['served', 'Served'],
-            ['rejected', 'Rejected'],
+            ['served', `Served (${counts.served})`],
+            ['rejected', `Rejected (${counts.rejected})`],
           ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setFilter(key)}
-            className={`px-3.5 py-2 text-xs font-medium rounded-md whitespace-nowrap shrink-0 cursor-pointer ${
-              filter === key
-                ? 'bg-[#B47B2B] text-white'
-                : fullScreen
-                ? 'bg-slate-900 text-slate-300 hover:bg-slate-800'
-                : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+        ).map(([key, label]) => {
+          const highlightNewTab = key === 'new' && counts.new > 0 && filter !== 'new';
+          const highlightAcceptedTab = key === 'accepted' && counts.accepted > 0 && filter !== 'accepted';
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setFilter(key)}
+              className={`px-3.5 py-2 text-xs font-medium rounded-md whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                filter === key
+                  ? 'bg-[#B47B2B] text-white'
+                  : highlightNewTab
+                  ? 'bg-amber-100 border-2 border-amber-500 text-amber-900 font-semibold'
+                  : highlightAcceptedTab
+                  ? fullScreen
+                    ? 'bg-sky-950/70 border border-sky-400 text-sky-200 font-semibold'
+                    : 'bg-sky-50 border-2 border-sky-400 text-sky-900 font-semibold'
+                  : fullScreen
+                  ? 'bg-slate-900 text-slate-300 hover:bg-slate-800'
+                  : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Ticket Grid */}
@@ -261,21 +441,56 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
             const elapsed = getElapsedMinutes(ticket.created_at);
             const isOverdue = ['new', 'accepted', 'preparing'].includes(ticket.status) && elapsed >= 18;
             const isNew = ticket.status === 'new';
+            const isAccepted = ticket.status === 'accepted';
+            const isPreparing = ticket.status === 'preparing';
+            const isReady = ticket.status === 'ready';
+            const isFresh = freshTicketIds.has(ticket.id);
+            const isJustAccepted = recentlyAcceptedIds.has(ticket.id);
+
+            const cardHighlightClass = fullScreen
+              ? isNew
+                ? 'bg-slate-900 border-2 border-amber-400 ring-2 ring-amber-400/35 shadow-lg'
+                : isAccepted
+                ? `bg-slate-900 border-2 border-sky-400 ring-2 ${isJustAccepted ? 'ring-sky-400/60 shadow-xl' : 'ring-sky-400/30 shadow-md'}`
+                : isPreparing
+                ? 'bg-slate-900 border-2 border-orange-400/80'
+                : isReady
+                ? 'bg-slate-900 border-2 border-emerald-400/80'
+                : 'bg-slate-900 border-slate-800'
+              : isNew
+              ? `bg-amber-50/80 border-2 border-amber-500 ring-2 ${isFresh ? 'ring-amber-500/60 shadow-lg' : 'ring-amber-400/30 shadow-sm'}`
+              : isAccepted
+              ? `bg-sky-50/85 border-2 border-sky-500 ring-2 ${isJustAccepted ? 'ring-sky-500/60 shadow-lg' : 'ring-sky-400/30 shadow-sm'}`
+              : isPreparing
+              ? 'bg-orange-50/35 border border-orange-300'
+              : isReady
+              ? 'bg-emerald-50/45 border border-emerald-400'
+              : 'bg-white border-zinc-200';
 
             return (
               <div
                 key={ticket.id}
-                className={`rounded-xl border p-5 flex flex-col justify-between transition-colors ${
-                  fullScreen
-                    ? isNew
-                      ? 'bg-slate-900 border-amber-500'
-                      : 'bg-slate-900 border-slate-800'
-                    : isNew
-                    ? 'bg-amber-50/40 border-amber-400'
-                    : 'bg-white border-zinc-200'
-                }`}
+                className={`rounded-xl border p-5 flex flex-col justify-between transition-all ${cardHighlightClass}`}
               >
                 <div>
+                  {isNew && (
+                    <div className={`mb-3 -mt-1 flex items-center justify-between gap-2 pb-2 border-b text-[11px] font-bold uppercase tracking-wider ${
+                      fullScreen ? 'border-amber-400/40 text-amber-300' : 'border-amber-300/60 text-amber-800'
+                    }`}>
+                      <span>{isFresh ? 'Just Arrived · Action Required' : 'New Order · Needs Acceptance'}</span>
+                      <span className="font-mono">{ticket.ticket_number}</span>
+                    </div>
+                  )}
+                  {isAccepted && (
+                    <div className={`mb-3 -mt-1 flex items-center justify-between gap-2 pb-2 border-b text-[11px] font-bold uppercase tracking-wider ${
+                      fullScreen ? 'border-sky-400/40 text-sky-300' : 'border-sky-300/70 text-sky-800'
+                    }`}>
+                      <span>{isJustAccepted ? 'Just Accepted · Ready to Cook' : 'Accepted · In Queue'}</span>
+                      <span className="font-medium normal-case truncate max-w-[140px]">
+                        Chef: {ticket.accepted_by_name || 'Kitchen'}
+                      </span>
+                    </div>
+                  )}
                   <div className="flex items-start justify-between gap-2 pb-3 border-b border-zinc-200/20">
                     <div>
                       <div className="flex items-center gap-2">
@@ -343,15 +558,17 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
                     <>
                       <button
                         type="button"
+                        disabled={updatingTicketId === ticket.id}
                         onClick={() => updateTicketStatus(ticket.id, 'accepted')}
-                        className="flex-1 py-2.5 px-3 text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white rounded-md cursor-pointer"
+                        className="flex-1 py-2.5 px-3 text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white rounded-md cursor-pointer disabled:opacity-50"
                       >
-                        Accept Order
+                        {updatingTicketId === ticket.id ? 'Accepting...' : 'Accept Order'}
                       </button>
                       <button
                         type="button"
+                        disabled={updatingTicketId === ticket.id}
                         onClick={() => setRejectModalTicket(ticket)}
-                        className="py-2.5 px-3 text-xs font-semibold bg-red-600/10 hover:bg-red-600/20 text-red-600 rounded-md cursor-pointer"
+                        className="py-2.5 px-3 text-xs font-semibold bg-red-600/10 hover:bg-red-600/20 text-red-600 rounded-md cursor-pointer disabled:opacity-50"
                       >
                         Reject
                       </button>
@@ -360,10 +577,11 @@ export function KitchenDashboard({ staffToken }: { staffToken: string }) {
                   {ticket.status === 'accepted' && (
                     <button
                       type="button"
+                      disabled={updatingTicketId === ticket.id}
                       onClick={() => updateTicketStatus(ticket.id, 'preparing')}
-                      className="w-full py-2.5 px-3 text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white rounded-md cursor-pointer"
+                      className="w-full py-2.5 px-3 text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white rounded-md cursor-pointer disabled:opacity-50"
                     >
-                      Start Preparing
+                      {updatingTicketId === ticket.id ? 'Starting...' : 'Start Preparing'}
                     </button>
                   )}
                   {ticket.status === 'preparing' && (

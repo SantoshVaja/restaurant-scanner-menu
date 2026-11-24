@@ -128,6 +128,15 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
     };
     if (targetRole) {
       realtime.broadcastToRoom(`role:${targetRole}`, 'notification:new', payload);
+      if (targetRole === 'kitchen') {
+        realtime.broadcastToRoom('role:chef', 'notification:new', payload);
+      }
+      if (targetRole !== 'admin') {
+        realtime.broadcastToRoom('role:admin', 'notification:new', payload);
+      }
+      if (targetRole !== 'super_admin') {
+        realtime.broadcastToRoom('role:super_admin', 'notification:new', payload);
+      }
     }
   }
 
@@ -1260,6 +1269,20 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
 
     if (!ticket) return res.status(404).json({ error: 'Kitchen ticket not found' });
 
+    const allowedTransitions: Record<string, string[]> = {
+      new: ['accepted', 'preparing', 'rejected'],
+      accepted: ['preparing', 'ready', 'rejected'],
+      preparing: ['ready', 'rejected'],
+      ready: ['served'],
+      served: [],
+      rejected: [],
+    };
+    if (ticket.status !== nextStatus && !(allowedTransitions[ticket.status] || []).includes(nextStatus)) {
+      return res.status(409).json({
+        error: `Cannot transition ticket ${ticket.ticket_number} from '${ticket.status}' to '${nextStatus}'.`,
+      });
+    }
+
     const orderStatusMap: Record<string, string> = {
       accepted: 'accepted',
       preparing: 'processing',
@@ -1269,66 +1292,109 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
     };
     const nextOrderStatus = orderStatusMap[nextStatus];
 
-    db.transaction(() => {
-      if (nextStatus === 'accepted') {
-        db.prepare("UPDATE kitchen_tickets SET status = 'accepted', accepted_by_user_id = ? WHERE id = ?").run(
-          req.staffUser!.id,
-          ticketId
+    if (ticket.status !== nextStatus) {
+      db.transaction(() => {
+        if (nextStatus === 'accepted') {
+          db.prepare("UPDATE kitchen_tickets SET status = 'accepted', accepted_by_user_id = ? WHERE id = ?").run(
+            req.staffUser!.id,
+            ticketId
+          );
+        } else if (nextStatus === 'preparing') {
+          db.prepare(
+            "UPDATE kitchen_tickets SET status = 'preparing', accepted_by_user_id = COALESCE(accepted_by_user_id, ?), started_at = COALESCE(started_at, datetime('now')) WHERE id = ?"
+          ).run(req.staffUser!.id, ticketId);
+        } else if (nextStatus === 'ready') {
+          db.prepare("UPDATE kitchen_tickets SET status = 'ready', ready_at = datetime('now') WHERE id = ?").run(ticketId);
+        } else if (nextStatus === 'served') {
+          db.prepare("UPDATE kitchen_tickets SET status = 'served', served_at = datetime('now') WHERE id = ?").run(ticketId);
+        } else if (nextStatus === 'rejected') {
+          db.prepare("UPDATE kitchen_tickets SET status = 'rejected', rejection_reason = ? WHERE id = ?").run(
+            reason,
+            ticketId
+          );
+          db.prepare("UPDATE orders SET rejection_reason = ? WHERE id = ?").run(reason, ticket.order_id);
+        }
+
+        db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").run(
+          nextOrderStatus,
+          ticket.order_id
         );
-      } else if (nextStatus === 'preparing') {
+
         db.prepare(
-          "UPDATE kitchen_tickets SET status = 'preparing', accepted_by_user_id = COALESCE(accepted_by_user_id, ?), started_at = COALESCE(started_at, datetime('now')) WHERE id = ?"
-        ).run(req.staffUser!.id, ticketId);
-      } else if (nextStatus === 'ready') {
-        db.prepare("UPDATE kitchen_tickets SET status = 'ready', ready_at = datetime('now') WHERE id = ?").run(ticketId);
-      } else if (nextStatus === 'served') {
-        db.prepare("UPDATE kitchen_tickets SET status = 'served', served_at = datetime('now') WHERE id = ?").run(ticketId);
-      } else if (nextStatus === 'rejected') {
-        db.prepare("UPDATE kitchen_tickets SET status = 'rejected', rejection_reason = ? WHERE id = ?").run(
-          reason,
-          ticketId
+          `INSERT INTO order_status_history (order_id, from_status, to_status, changed_by_user_id, changed_by_role, note)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(
+          ticket.order_id,
+          ticket.order_status,
+          nextOrderStatus,
+          req.staffUser!.id,
+          req.staffUser!.role,
+          reason || `Kitchen updated ticket ${ticket.ticket_number} to ${nextStatus}`
         );
-        db.prepare("UPDATE orders SET rejection_reason = ? WHERE id = ?").run(reason, ticket.order_id);
+      })();
+
+      const tLabel = `Table ${String(ticket.table_number).padStart(2, '0')}`;
+      if (nextStatus === 'accepted') {
+        pushNotification(
+          'counter',
+          ticket.table_id,
+          `${ticket.ticket_number} Accepted`,
+          `${tLabel} (${ticket.order_number}) accepted by ${req.staffUser!.name}`,
+          'kitchen',
+          ticket.order_number
+        );
+      } else if (nextStatus === 'ready') {
+        pushNotification('waiter', ticket.table_id, `${ticket.ticket_number} Ready`, `${tLabel} (${ticket.order_number}) is ready to serve!`, 'kitchen', ticket.order_number);
+        pushNotification('counter', ticket.table_id, `${ticket.ticket_number} Ready`, `${tLabel} food ready`, 'kitchen', ticket.order_number);
+      } else if (nextStatus === 'rejected') {
+        pushNotification('counter', ticket.table_id, `${ticket.ticket_number} Rejected`, `${tLabel}: ${reason}`, 'alert', ticket.order_number);
       }
 
-      db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").run(
-        nextOrderStatus,
-        ticket.order_id
-      );
-
-      db.prepare(
-        `INSERT INTO order_status_history (order_id, from_status, to_status, changed_by_user_id, changed_by_role, note)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run(
-        ticket.order_id,
-        ticket.order_status,
-        nextOrderStatus,
-        req.staffUser!.id,
-        req.staffUser!.role,
-        reason || `Kitchen updated ticket ${ticket.ticket_number} to ${nextStatus}`
-      );
-    })();
-
-    const tLabel = `Table ${String(ticket.table_number).padStart(2, '0')}`;
-    if (nextStatus === 'ready') {
-      pushNotification('waiter', ticket.table_id, `${ticket.ticket_number} Ready`, `${tLabel} (${ticket.order_number}) is ready to serve!`, 'kitchen', ticket.order_number);
-      pushNotification('counter', ticket.table_id, `${ticket.ticket_number} Ready`, `${tLabel} food ready`, 'kitchen', ticket.order_number);
-    } else if (nextStatus === 'rejected') {
-      pushNotification('counter', ticket.table_id, `${ticket.ticket_number} Rejected`, `${tLabel}: ${reason}`, 'alert', ticket.order_number);
+      writeAudit(req.staffUser!.id, req.staffUser!.role, `kitchen_ticket_${nextStatus}`, 'kitchen_tickets', ticketId, { reason });
     }
 
-    writeAudit(req.staffUser!.id, req.staffUser!.role, `kitchen_ticket_${nextStatus}`, 'kitchen_tickets', ticketId, { reason });
-    realtime.broadcastOrderUpdate(ticket.table_session_id, {
+    const updatedTicketRow = db
+      .prepare(
+        `SELECT kt.*, o.order_number, o.payment_status, o.special_instructions, dt.table_number, u.name as accepted_by_name
+         FROM kitchen_tickets kt
+         JOIN orders o ON o.id = kt.order_id
+         JOIN dining_tables dt ON dt.id = kt.table_id
+         LEFT JOIN users u ON u.id = kt.accepted_by_user_id
+         WHERE kt.id = ?`
+      )
+      .get(ticketId) as Record<string, unknown>;
+
+    const ticketItems = db
+      .prepare('SELECT * FROM kitchen_ticket_items WHERE kitchen_ticket_id = ? ORDER BY id ASC')
+      .all(ticketId) as Array<Record<string, unknown>>;
+
+    const hydratedTicket = {
+      ...updatedTicketRow,
+      items: ticketItems.map((i) => ({ ...i, addons: JSON.parse(String(i.addons_json || '[]')) })),
+    };
+
+    const wsPayload = {
       type: 'kitchen_status_changed',
       ticketId,
       ticketNumber: ticket.ticket_number,
       orderId: ticket.order_id,
       orderNumber: ticket.order_number,
+      tableNumber: ticket.table_number,
       status: nextStatus,
       orderStatus: nextOrderStatus,
-    });
+      acceptedByName: updatedTicketRow?.accepted_by_name || req.staffUser!.name,
+      ticket: hydratedTicket,
+    };
 
-    res.json({ ok: true, ticket_status: nextStatus, order_status: nextOrderStatus });
+    realtime.broadcastOrderUpdate(ticket.table_session_id, wsPayload);
+    realtime.broadcastToRoom('role:kitchen', 'kitchen:ticket_updated', wsPayload);
+
+    res.json({
+      ok: true,
+      ticket_status: nextStatus,
+      order_status: nextOrderStatus,
+      ticket: hydratedTicket,
+    });
   });
 
   // ==================== 6. COUNTER / POS SYSTEM ====================
@@ -1660,19 +1726,37 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
       tableId,
     });
     realtime.broadcastOrderUpdate(activeSess.id, { type: 'session_closed', tableId });
-    res.json({ ok: true, invoice });
+    res.json({
+      ok: true,
+      invoice: {
+        ...(invoice as Record<string, unknown>),
+        session_code: activeSess.session_code,
+        orders: summary.orders,
+        payments: summary.payments,
+      },
+    });
   });
 
   app.get('/api/pos/invoices', requireAuth, requireRole(['counter', 'admin', 'super_admin']), (_req, res) => {
     const invoices = db
       .prepare(
-        `SELECT i.*, dt.table_number
+        `SELECT i.*, dt.table_number, ts.session_code
          FROM invoices i
          JOIN dining_tables dt ON dt.id = i.table_id
+         LEFT JOIN table_sessions ts ON ts.id = i.table_session_id
          ORDER BY i.id DESC LIMIT 50`
       )
-      .all();
-    res.json({ invoices });
+      .all() as Array<Record<string, unknown>>;
+
+    const enriched = invoices.map((inv) => {
+      const summary = getSessionBillSummary(Number(inv.table_session_id));
+      return {
+        ...inv,
+        orders: summary.orders,
+        payments: summary.payments,
+      };
+    });
+    res.json({ invoices: enriched });
   });
 
   // ==================== 7. WAITER DASHBOARD ====================
@@ -1958,6 +2042,19 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
          ORDER BY dt.table_number ASC`
       )
       .all() as Array<Record<string, unknown>>;
+
+    // Ensure every table has an active QR token so bulk PDF sheets are always valid
+    for (const row of rows) {
+      if (!row.token_value) {
+        const rawToken = generateSecureToken(20);
+        db.prepare('INSERT INTO table_qr_tokens (table_id, token_hash, token_value, is_active) VALUES (?, ?, ?, 1)').run(
+          Number(row.id),
+          sha256(rawToken),
+          rawToken
+        );
+        row.token_value = rawToken;
+      }
+    }
 
     const withQr = await Promise.all(
       rows.map(async (row) => {
@@ -2299,10 +2396,18 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
 
   app.get('/api/notifications', requireAuth, (req, res) => {
     const role = req.staffUser!.role;
-    const rows =
-      role === 'super_admin' || role === 'admin'
-        ? db.prepare('SELECT * FROM notifications ORDER BY id DESC LIMIT 40').all()
-        : db.prepare('SELECT * FROM notifications WHERE target_role = ? OR target_role IS NULL ORDER BY id DESC LIMIT 40').all(role);
+    let rows: unknown[];
+    if (role === 'super_admin' || role === 'admin') {
+      rows = db.prepare('SELECT * FROM notifications ORDER BY id DESC LIMIT 40').all();
+    } else if (role === 'chef') {
+      rows = db
+        .prepare("SELECT * FROM notifications WHERE target_role IN ('chef', 'kitchen') OR target_role IS NULL ORDER BY id DESC LIMIT 40")
+        .all();
+    } else {
+      rows = db
+        .prepare('SELECT * FROM notifications WHERE target_role = ? OR target_role IS NULL ORDER BY id DESC LIMIT 40')
+        .all(role);
+    }
     res.json({ notifications: rows });
   });
 
@@ -2310,8 +2415,10 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
     const role = req.staffUser!.role;
     if (role === 'super_admin' || role === 'admin') {
       db.prepare('UPDATE notifications SET is_read = 1').run();
+    } else if (role === 'chef') {
+      db.prepare("UPDATE notifications SET is_read = 1 WHERE target_role IN ('chef', 'kitchen') OR target_role IS NULL").run();
     } else {
-      db.prepare('UPDATE notifications SET is_read = 1 WHERE target_role = ?').run(role);
+      db.prepare('UPDATE notifications SET is_read = 1 WHERE target_role = ? OR target_role IS NULL').run(role);
     }
     res.json({ ok: true });
   });

@@ -589,7 +589,7 @@ export function CustomerOrderPortal({
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="min-w-0">
             <p className="text-[11px] text-[#D4A359] font-medium truncate">
-              {restaurant?.name || 'Saffron & Ember'} · {tableInfo.section}
+              {restaurant?.name || 'FoodMitra'} · {tableInfo.section}
             </p>
             <h1 className="text-sm sm:text-base font-semibold truncate">
               Welcome to our restaurant · Table {paddedTable}
@@ -1170,13 +1170,13 @@ export function CustomerOrderPortal({
               {/* Coupon */}
               <div className="pt-2">
                 <label className="block text-xs font-medium text-zinc-700 mb-1 flex items-center gap-1">
-                  <Tag className="w-3.5 h-3.5" /> Promo Coupon (Try SAFFRON10)
+                  <Tag className="w-3.5 h-3.5" /> Promo Coupon (Try FOODMITRA10)
                 </label>
                 <div className="flex gap-2">
                   <input
                     value={couponInput}
                     onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                    placeholder="SAFFRON10"
+                    placeholder="FOODMITRA10"
                     className="flex-1 px-3 py-2 text-xs border border-zinc-300 rounded-md uppercase"
                   />
                   <button
@@ -1313,7 +1313,7 @@ export function CustomerOrderPortal({
                   {pendingPayment.is_sandbox_demo ? 'Simulated Sandbox Payment Mode' : 'Razorpay Checkout'}
                 </p>
                 <h3 className="text-lg font-semibold mt-0.5">
-                  {restaurant?.name || 'Saffron & Ember'} · Table {paddedTable}
+                  {restaurant?.name || 'FoodMitra'} · Table {paddedTable}
                 </h3>
                 <p className="text-xs text-zinc-400 font-mono mt-0.5">{pendingPayment.order.order_number}</p>
               </div>

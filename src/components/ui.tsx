@@ -268,7 +268,7 @@ export function PublicFooter({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14 grid grid-cols-1 md:grid-cols-4 gap-10">
         <div>
           <h3 className="font-display text-2xl font-semibold text-white">
-            {restaurant?.name || 'Saffron & Ember'}
+            {restaurant?.name || 'FoodMitra'}
           </h3>
           <p className="mt-3 text-sm text-zinc-400 leading-relaxed">
             {restaurant?.tagline || 'Wood-Fired Indian Heritage, Served Table-Side.'}
@@ -327,7 +327,7 @@ export function PublicFooter({
         </div>
       </div>
       <div className="border-t border-zinc-800/80 py-5 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-zinc-500">
-        <span>© {new Date().getFullYear()} {restaurant?.name || 'Saffron & Ember'}. All rights reserved.</span>
+        <span>© {new Date().getFullYear()} {restaurant?.name || 'FoodMitra'}. All rights reserved.</span>
         <span>GST Compliant · Instant QR Dining · Verified Online Payments</span>
       </div>
     </footer>

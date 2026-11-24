@@ -198,7 +198,7 @@ export function PublicWebsite({
               <div className="relative h-80 sm:h-[460px] lg:h-full min-h-[420px] rounded-xl overflow-hidden bg-zinc-900">
                 <SafeImage
                   src={HERO_IMG}
-                  alt="Saffron and Ember evening dining room"
+                  alt="FoodMitra evening dining room"
                   className="w-full h-full object-cover"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/15 to-transparent flex items-end p-6 sm:p-8">
@@ -285,12 +285,12 @@ export function PublicWebsite({
                 24-Hour Simmered Lentils, Hand-Pounded Spices &amp; Effortless Hospitality
               </h2>
               <p className="mt-5 text-base text-zinc-600 leading-relaxed">
-                Led by Executive Chef Vikram Singh, every dish at Saffron &amp; Ember begins with whole spices roasted daily and stone-ground in small batches. Our copper handis and white-oak clay tandoors honor North-West Frontier technique while embracing modern table-side convenience.
+                Led by Executive Chef Vikram Singh, every dish at FoodMitra begins with whole spices roasted daily and stone-ground in small batches. Our copper handis and white-oak clay tandoors honor North-West Frontier technique while embracing modern table-side convenience.
               </p>
 
               <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-6 border-t border-zinc-200 pt-8">
                 <div>
-                  <p className="text-sm font-semibold text-[#18181B]">Dining Offer · SAFFRON10</p>
+                  <p className="text-sm font-semibold text-[#18181B]">Dining Offer · FOODMITRA10</p>
                   <p className="mt-1 text-sm text-zinc-600">Enjoy 10% off table orders above ₹500 when ordering via your table QR.</p>
                 </div>
                 <div>
@@ -596,7 +596,7 @@ export function PublicWebsite({
               Rooted in Hearth, Refined for Modern Dining
             </h1>
             <p className="mt-5 text-base text-zinc-600 leading-relaxed">
-              Founded in Bandra West, Saffron &amp; Ember was conceived as a tribute to slow-cooked Indian regional cuisine without the friction of traditional service delays. Every table is paired with bespoke brass QR hospitality so guests enjoy unhurried conversation alongside immediate kitchen precision.
+              Founded in Bandra West, FoodMitra was conceived as a tribute to slow-cooked Indian regional cuisine without the friction of traditional service delays. Every table is paired with bespoke brass QR hospitality so guests enjoy unhurried conversation alongside immediate kitchen precision.
             </p>
             <div className="mt-8 grid grid-cols-2 gap-6 border-t border-zinc-200 pt-6">
               <div>
@@ -611,7 +611,7 @@ export function PublicWebsite({
           </div>
           <div className="lg:col-span-6">
             <div className="aspect-[4/3] rounded-xl overflow-hidden">
-              <SafeImage src={HERO_IMG} alt="Saffron and Ember interior" className="w-full h-full object-cover" />
+              <SafeImage src={HERO_IMG} alt="FoodMitra interior" className="w-full h-full object-cover" />
             </div>
           </div>
         </div>
@@ -865,7 +865,7 @@ export function PublicWebsite({
               <Mail className="w-4 h-4 text-[#B47B2B] mt-0.5 shrink-0" />
               <div>
                 <p className="font-semibold text-[#18181B]">Email</p>
-                <p className="text-zinc-600">{restaurant?.email || 'concierge@saffronember.in'}</p>
+                <p className="text-zinc-600">{restaurant?.email || 'concierge@foodmitra.in'}</p>
               </div>
             </div>
             <div className="flex items-start gap-3">

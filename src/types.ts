@@ -215,6 +215,7 @@ export interface InvoiceRecord {
   id: number;
   invoice_number: string;
   table_session_id: number;
+  session_code?: string;
   table_id: number;
   table_number: number;
   subtotal_paise: number;
@@ -225,6 +226,8 @@ export interface InvoiceRecord {
   paid_paise: number;
   payment_status: string;
   created_at: string;
+  orders?: Order[];
+  payments?: PaymentRecord[];
 }
 
 export interface Reservation {

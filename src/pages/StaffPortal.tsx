@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   UserCheck,
   Utensils,
+  X,
 } from 'lucide-react';
 import type {
   AppNotification,
@@ -21,6 +22,7 @@ import type {
 } from '../types.ts';
 import { apiFetch, parseJsonSafe } from '../lib/api.ts';
 import { formatDateTimeIST } from '../lib/format.ts';
+import { useRealtimeRoom } from '../lib/ws.ts';
 import { KitchenDashboard } from './KitchenDashboard.tsx';
 import { CounterPosDashboard } from './CounterPosDashboard.tsx';
 import { WaiterDashboard } from './WaiterDashboard.tsx';
@@ -79,9 +81,11 @@ export function StaffPortal({
   const [loggingIn, setLoggingIn] = useState(false);
   const [demoAccounts, setDemoAccounts] = useState<DemoCredential[]>([]);
 
-  // Notifications
+  // Notifications & Real-Time Staff Highlights
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [liveToast, setLiveToast] = useState<{ id: number; title: string; message: string; type: string } | null>(null);
+  const [newKitchenCount, setNewKitchenCount] = useState<number>(0);
 
   useEffect(() => {
     apiFetch('/api/auth/demo-accounts')
@@ -106,11 +110,60 @@ export function StaffPortal({
     }
   }, []);
 
-  useEffect(() => {
-    if (staffToken) {
-      loadNotifications(staffToken);
+  const loadKitchenNewCount = useCallback(async (tok: string, role: RoleSlug) => {
+    if (!['super_admin', 'admin', 'chef'].includes(role)) return;
+    try {
+      const resp = await apiFetch('/api/kitchen/tickets', {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (resp.ok) {
+        const d = await parseJsonSafe<{ tickets?: Array<{ status: string }> }>(resp);
+        const newCnt = (d.tickets || []).filter((t) => t.status === 'new').length;
+        setNewKitchenCount(newCnt);
+      }
+    } catch {
+      // Ignore transient refresh failure
     }
-  }, [staffToken, loadNotifications]);
+  }, []);
+
+  useEffect(() => {
+    if (staffToken && staffUser) {
+      loadNotifications(staffToken);
+      loadKitchenNewCount(staffToken, staffUser.role);
+    }
+  }, [staffToken, staffUser, loadNotifications, loadKitchenNewCount]);
+
+  // Real-time WebSocket subscription for Staff Notifications & Kitchen Badge
+  const staffWsRoom = staffUser
+    ? staffUser.role === 'chef'
+      ? 'role:kitchen'
+      : `role:${staffUser.role}`
+    : null;
+
+  useRealtimeRoom({
+    room: staffWsRoom,
+    staffToken,
+    onEvent: (evt, payload) => {
+      if (!staffToken || !staffUser) return;
+      if (evt === 'notification:new') {
+        loadNotifications(staffToken);
+        loadKitchenNewCount(staffToken, staffUser.role);
+        if (payload && typeof payload === 'object') {
+          const p = payload as { id?: number; title?: string; message?: string; type?: string };
+          if (p.title && p.message) {
+            const toastId = Date.now();
+            setLiveToast({ id: toastId, title: p.title, message: p.message, type: p.type || 'info' });
+            window.setTimeout(() => {
+              setLiveToast((curr) => (curr && curr.id === toastId ? null : curr));
+            }, 8000);
+          }
+        }
+      } else if (evt === 'sync:update' || evt === 'reservation:new') {
+        loadNotifications(staffToken);
+        loadKitchenNewCount(staffToken, staffUser.role);
+      }
+    },
+  });
 
   async function handleLogin(loginEmail: string, loginPass: string) {
     setLoggingIn(true);
@@ -183,7 +236,7 @@ export function StaffPortal({
                 <span className="text-xs font-semibold uppercase tracking-wider">Restaurant 360° Staff Portal</span>
               </div>
               <h1 className="mt-2 font-display text-3xl font-semibold text-[#18181B]">
-                {restaurant?.name || 'Saffron & Ember'} Operations
+                {restaurant?.name || 'FoodMitra'} Operations
               </h1>
               <p className="mt-1.5 text-xs text-zinc-600">
                 Sign in with your role credentials to access Kitchen KDS, Counter POS, Waiter, Admin, or QA Lab.
@@ -209,7 +262,7 @@ export function StaffPortal({
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="role@saffronember.in"
+                    placeholder="role@foodmitra.in"
                     className="w-full px-3.5 py-2.5 text-sm border border-zinc-300 rounded-md focus:outline-none focus:border-[#B47B2B]"
                   />
                 </div>
@@ -293,7 +346,7 @@ export function StaffPortal({
           <div className="p-5 border-b border-slate-800">
             <p className="text-[11px] uppercase tracking-wider text-[#D4A359] font-semibold">Restaurant 360°</p>
             <h1 className="font-display text-xl font-semibold text-white mt-0.5">
-              {restaurant?.name || 'Saffron & Ember'}
+              {restaurant?.name || 'FoodMitra'}
             </h1>
           </div>
 
@@ -301,17 +354,29 @@ export function StaffPortal({
             {navItems.map((item) => {
               const Icon = item.icon;
               const active = activeModule === item.id;
+              const highlightKitchen = item.id === 'kitchen' && newKitchenCount > 0;
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={() => setActiveModule(item.id)}
-                  className={`flex items-center gap-2.5 px-3.5 py-2.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    active ? 'bg-[#B47B2B] text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                  className={`flex items-center justify-between gap-2.5 px-3.5 py-2.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    active
+                      ? 'bg-[#B47B2B] text-white'
+                      : highlightKitchen
+                      ? 'bg-amber-500/20 text-amber-200 border border-amber-400/60 hover:bg-amber-500/30'
+                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
                   }`}
                 >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span>{item.label}</span>
+                  <span className="flex items-center gap-2.5">
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span>{item.label}</span>
+                  </span>
+                  {highlightKitchen && (
+                    <span className="px-1.5 py-0.5 text-[10px] font-bold bg-amber-400 text-slate-950 rounded tabular-nums">
+                      {newKitchenCount} New
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -357,12 +422,16 @@ export function StaffPortal({
               <button
                 type="button"
                 onClick={() => setNotifOpen(!notifOpen)}
-                className="relative p-2 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 rounded-md cursor-pointer"
+                className={`relative p-2 rounded-md cursor-pointer transition-colors ${
+                  unreadCount > 0
+                    ? 'bg-amber-50 text-amber-800 ring-2 ring-amber-400/70 hover:bg-amber-100'
+                    : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'
+                }`}
                 aria-label="Notifications"
               >
                 <Bell className="w-4 h-4" />
                 {unreadCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 px-1.5 min-w-4 h-4 bg-red-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                  <span className="absolute -top-1 -right-1 px-1.5 min-w-4 h-4 bg-red-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center tabular-nums">
                     {unreadCount}
                   </span>
                 )}
@@ -371,7 +440,9 @@ export function StaffPortal({
               {notifOpen && (
                 <div className="absolute right-0 mt-2 w-80 bg-white border border-zinc-200 rounded-xl shadow-xl z-40 overflow-hidden">
                   <div className="px-4 py-2.5 border-b border-zinc-100 flex items-center justify-between">
-                    <span className="text-xs font-semibold text-zinc-900">Notifications</span>
+                    <span className="text-xs font-semibold text-zinc-900">
+                      Notifications {unreadCount > 0 ? `(${unreadCount} unread)` : ''}
+                    </span>
                     <button
                       type="button"
                       onClick={markNotificationsRead}
@@ -385,8 +456,18 @@ export function StaffPortal({
                       <p className="p-4 text-xs text-zinc-500 text-center">No notifications</p>
                     ) : (
                       notifications.map((n) => (
-                        <div key={n.id} className={`p-3 text-xs ${n.is_read ? 'bg-white' : 'bg-amber-50/40'}`}>
-                          <p className="font-semibold text-zinc-900">{n.title}</p>
+                        <div
+                          key={n.id}
+                          className={`p-3 text-xs ${
+                            n.is_read ? 'bg-white' : 'bg-amber-50/90'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-semibold text-zinc-900">{n.title}</p>
+                            {!n.is_read && (
+                              <span className="text-[10px] font-bold uppercase text-amber-700">New</span>
+                            )}
+                          </div>
                           <p className="text-zinc-600 mt-0.5">{n.message}</p>
                           <p className="text-[10px] text-zinc-400 mt-1">{formatDateTimeIST(n.created_at)}</p>
                         </div>
@@ -407,6 +488,54 @@ export function StaffPortal({
           </div>
         </header>
 
+        {/* Real-Time Staff Alert Toast */}
+        {liveToast && (
+          <div className="fixed top-16 right-4 z-50 w-80 sm:w-96 bg-[#0F172A] text-white border-2 border-amber-400 rounded-xl shadow-2xl p-4 flex items-start gap-3 no-print">
+            <div className="w-8 h-8 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center shrink-0 mt-0.5">
+              <Bell className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
+                Real-Time Alert
+              </p>
+              <p className="text-xs font-semibold text-white mt-0.5">{liveToast.title}</p>
+              <p className="text-xs text-slate-300 mt-0.5">{liveToast.message}</p>
+              <div className="mt-2.5 flex items-center gap-2">
+                {liveToast.type === 'kitchen' && allowedModules.includes('kitchen') && activeModule !== 'kitchen' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveModule('kitchen');
+                      setLiveToast(null);
+                    }}
+                    className="px-2.5 py-1 text-[11px] font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded cursor-pointer"
+                  >
+                    Open Kitchen KDS
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNotifOpen(true);
+                    setLiveToast(null);
+                  }}
+                  className="px-2.5 py-1 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded cursor-pointer"
+                >
+                  View Alerts
+                </button>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLiveToast(null)}
+              className="text-slate-400 hover:text-white cursor-pointer"
+              aria-label="Close alert"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
           {activeModule === 'admin' && (
             <AdminDashboard
@@ -419,7 +548,12 @@ export function StaffPortal({
               onOpenQrUrl={onOpenQrUrl}
             />
           )}
-          {activeModule === 'kitchen' && <KitchenDashboard staffToken={staffToken} />}
+          {activeModule === 'kitchen' && (
+            <KitchenDashboard
+              staffToken={staffToken}
+              onCountsChange={(c) => setNewKitchenCount(c.new)}
+            />
+          )}
           {activeModule === 'counter' && <CounterPosDashboard staffToken={staffToken} restaurant={restaurant} />}
           {activeModule === 'waiter' && <WaiterDashboard staffToken={staffToken} />}
           {activeModule === 'qa' && <QADashboard staffToken={staffToken} />}

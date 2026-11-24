@@ -60,7 +60,7 @@ export function downloadInvoicePdf(
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(18);
-  doc.text(restaurant?.name || 'Saffron & Ember', 48, y);
+  doc.text(restaurant?.name || 'FoodMitra', 48, y);
   y += 18;
 
   doc.setFont('helvetica', 'normal');
@@ -136,7 +136,7 @@ export function downloadInvoicePdf(
   doc.setFontSize(10);
   doc.text(`Paid: Rs. ${(invoice.paid_paise / 100).toFixed(2)}  |  Status: ${invoice.payment_status.toUpperCase()}`, 48, y);
   y += 24;
-  doc.text('Thank you for dining with Saffron & Ember · Powered by Restaurant 360°', 48, y);
+  doc.text('Thank you for dining with FoodMitra · Powered by Restaurant 360°', 48, y);
 
   doc.save(`${invoice.invoice_number}.pdf`);
 }
@@ -164,7 +164,7 @@ export function downloadAllTableQrsPdf(
   const gapY = 26;
   const cardW = (pageW - marginX * 2 - gapX) / 2; // ~249.6 pt
   const cardH = (pageH - marginY * 2 - gapY) / 2; // ~369.9 pt
-  const brandName = (restaurant?.name || 'Saffron & Ember').toUpperCase();
+  const brandName = (restaurant?.name || 'FoodMitra').toUpperCase();
 
   const sorted = [...tables].sort((a, b) => a.table_number - b.table_number);
 

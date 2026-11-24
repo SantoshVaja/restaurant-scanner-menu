@@ -111,7 +111,7 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-[#18181B]">
       <PublicNavbar
-        restaurantName={restaurant?.name || 'Saffron & Ember'}
+        restaurantName={restaurant?.name || 'FoodMitra'}
         activePage={publicPage}
         onNavigate={setPublicPage}
       />

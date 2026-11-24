@@ -360,7 +360,7 @@ export function initSchema(db: DBInstance): void {
 export const DEMO_STAFF_SEEDS = [
   {
     name: 'Arjun Malhotra',
-    email: 'owner@saffronember.in',
+    email: 'owner@foodmitra.in',
     phone: '+91 98201 44001',
     role: 'super_admin',
     demoPass: 'Owner@360',
@@ -368,7 +368,7 @@ export const DEMO_STAFF_SEEDS = [
   },
   {
     name: 'Meera Nair',
-    email: 'admin@saffronember.in',
+    email: 'admin@foodmitra.in',
     phone: '+91 98201 44002',
     role: 'admin',
     demoPass: 'Admin@360',
@@ -376,7 +376,7 @@ export const DEMO_STAFF_SEEDS = [
   },
   {
     name: 'Chef Vikram Singh',
-    email: 'chef@saffronember.in',
+    email: 'chef@foodmitra.in',
     phone: '+91 98201 44003',
     role: 'chef',
     demoPass: 'Chef@360',
@@ -384,7 +384,7 @@ export const DEMO_STAFF_SEEDS = [
   },
   {
     name: 'Rohan Kulkarni',
-    email: 'counter@saffronember.in',
+    email: 'counter@foodmitra.in',
     phone: '+91 98201 44004',
     role: 'counter',
     demoPass: 'Counter@360',
@@ -392,7 +392,7 @@ export const DEMO_STAFF_SEEDS = [
   },
   {
     name: 'Kabir Sharma',
-    email: 'waiter@saffronember.in',
+    email: 'waiter@foodmitra.in',
     phone: '+91 98201 44005',
     role: 'waiter',
     demoPass: 'Waiter@360',
@@ -410,6 +410,14 @@ const IMG_BEVERAGES = '/src/assets/images/dish_craft_beverages_1795504321083.jpg
 export function seedDatabaseIfEmpty(db: DBInstance, forceReset = false): void {
   const existing = db.prepare('SELECT COUNT(*) as cnt FROM restaurants').get() as { cnt: number };
   if (existing.cnt > 0 && !forceReset) {
+    // Idempotent upgrade for existing SQLite databases created prior to FoodMitra rebrand
+    db.transaction(() => {
+      db.prepare("UPDATE restaurants SET name = 'FoodMitra' WHERE name = 'Saffron & Ember'").run();
+      db.prepare("UPDATE restaurants SET email = 'concierge@foodmitra.in' WHERE email = 'concierge@saffronember.in'").run();
+      db.prepare("UPDATE restaurants SET social_links_json = REPLACE(social_links_json, 'saffronember', 'foodmitra') WHERE social_links_json LIKE '%saffronember%'").run();
+      db.prepare("UPDATE users SET email = REPLACE(email, '@saffronember.in', '@foodmitra.in') WHERE email LIKE '%@saffronember.in'").run();
+      db.prepare("UPDATE coupons SET code = 'FOODMITRA10' WHERE code = 'SAFFRON10'").run();
+    })();
     return;
   }
 
@@ -513,12 +521,12 @@ export function seedDatabaseIfEmpty(db: DBInstance, forceReset = false): void {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
-        'Saffron & Ember',
+        'FoodMitra',
         'Wood-Fired Indian Heritage, Served Table-Side',
         'An intimate modern Indian dining room in Bandra West celebrating charcoal tandoor craft, slow-simmered gravies, and regional spice blends.',
         '14 Pali Hill Courtyard, Bandra West, Mumbai 400050',
         '+91 22 4890 3600',
-        'concierge@saffronember.in',
+        'concierge@foodmitra.in',
         '27AABCS1429B1Z5',
         'INR',
         'Asia/Kolkata',
@@ -528,8 +536,8 @@ export function seedDatabaseIfEmpty(db: DBInstance, forceReset = false): void {
           days: 'Open Daily · Monday to Sunday',
         }),
         JSON.stringify({
-          instagram: 'https://instagram.com/saffronember',
-          facebook: 'https://facebook.com/saffronember',
+          instagram: 'https://instagram.com/foodmitra',
+          facebook: 'https://facebook.com/foodmitra',
           maps: 'https://maps.google.com/?q=Pali+Hill+Bandra+Mumbai',
         })
       );
@@ -715,7 +723,7 @@ export function seedDatabaseIfEmpty(db: DBInstance, forceReset = false): void {
       `INSERT INTO coupons (code, description, discount_type, discount_value, min_order_paise, max_discount_paise, usage_limit, used_count, valid_from, valid_until, is_active)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, '2025-01-01', '2028-12-31', 1)`
     );
-    insertCoupon.run('SAFFRON10', '10% off dining orders above ₹500', 'percent', 10, 50000, 30000, 1000);
+    insertCoupon.run('FOODMITRA10', '10% off dining orders above ₹500', 'percent', 10, 50000, 30000, 1000);
     insertCoupon.run('WELCOME100', 'Flat ₹100 off on orders above ₹700', 'fixed', 10000, 70000, null, 500);
     insertCoupon.run('FESTIVE15', '15% chef celebration offer above ₹1,200', 'percent', 15, 120000, 50000, 250);
 

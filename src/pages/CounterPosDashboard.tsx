@@ -5,6 +5,7 @@ import {
   CreditCard,
   Download,
   Printer,
+  QrCode,
   Receipt,
   RefreshCw,
   Search,
@@ -18,9 +19,22 @@ import type {
   RestaurantInfo,
 } from '../types.ts';
 import { apiFetch, parseJsonSafe } from '../lib/api.ts';
-import { downloadInvoicePdf, formatDateTimeIST, formatINR } from '../lib/format.ts';
+import {
+  downloadAllTableQrsPdf,
+  downloadInvoicePdf,
+  formatDateTimeIST,
+  formatINR,
+  type PrintableTableQr,
+} from '../lib/format.ts';
 import { useRealtimeRoom } from '../lib/ws.ts';
 import { ConfirmModal, StatusLabel } from '../components/ui.tsx';
+
+interface QrTableItem extends PrintableTableQr {
+  id: number;
+  status: string;
+  qr_relative_url: string;
+  qr_full_url: string;
+}
 
 interface TableBillData {
   table: DiningTable;
@@ -45,10 +59,13 @@ export function CounterPosDashboard({
   staffToken: string;
   restaurant: RestaurantInfo | null;
 }) {
-  const [tab, setTab] = useState<'tables' | 'orders' | 'invoices'>('tables');
+  const [tab, setTab] = useState<'tables' | 'orders' | 'invoices' | 'qrs'>('tables');
   const [tables, setTables] = useState<DiningTable[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
+  const [qrTables, setQrTables] = useState<QrTableItem[]>([]);
+  const [generatingQrPdf, setGeneratingQrPdf] = useState(false);
+  const [qrNotice, setQrNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [search, setSearch] = useState('');
 
   // Selected Table Consolidated Bill Drawer
@@ -63,21 +80,84 @@ export function CounterPosDashboard({
   const [transferTargetId, setTransferTargetId] = useState<string>('');
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [lastInvoice, setLastInvoice] = useState<InvoiceRecord | null>(null);
+  const [printInvoice, setPrintInvoice] = useState<InvoiceRecord | null>(null);
+  const [pendingPrint, setPendingPrint] = useState(false);
+
+  const triggerPrintInvoice = useCallback((inv: InvoiceRecord) => {
+    setPrintInvoice(inv);
+    setPendingPrint(true);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingPrint || !printInvoice) return;
+    setPendingPrint(false);
+    const frame1 = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.print();
+      });
+    });
+    return () => window.cancelAnimationFrame(frame1);
+  }, [pendingPrint, printInvoice]);
 
   const loadAll = useCallback(async () => {
     try {
-      const [tRes, oRes, iRes] = await Promise.all([
+      const [tRes, oRes, iRes, qRes] = await Promise.all([
         apiFetch('/api/pos/tables', { headers: { Authorization: `Bearer ${staffToken}` } }),
         apiFetch('/api/pos/orders', { headers: { Authorization: `Bearer ${staffToken}` } }),
         apiFetch('/api/pos/invoices', { headers: { Authorization: `Bearer ${staffToken}` } }),
+        apiFetch('/api/admin/tables/qrs', { headers: { Authorization: `Bearer ${staffToken}` } }),
       ]);
       if (tRes.ok) setTables((await parseJsonSafe<{ tables?: DiningTable[] }>(tRes)).tables || []);
       if (oRes.ok) setOrders((await parseJsonSafe<{ orders?: Order[] }>(oRes)).orders || []);
       if (iRes.ok) setInvoices((await parseJsonSafe<{ invoices?: InvoiceRecord[] }>(iRes)).invoices || []);
+      if (qRes.ok) setQrTables((await parseJsonSafe<{ tables?: QrTableItem[] }>(qRes)).tables || []);
     } catch {
       // Ignore transient error
     }
   }, [staffToken]);
+
+  const handleBulkGenerateQrPdf = useCallback(
+    async (subset?: QrTableItem[]) => {
+      setGeneratingQrPdf(true);
+      setQrNotice(null);
+      try {
+        const resp = await apiFetch('/api/admin/tables/qrs', {
+          headers: { Authorization: `Bearer ${staffToken}` },
+        });
+        const data = await parseJsonSafe<{ tables?: QrTableItem[]; error?: string }>(resp);
+        if (!resp.ok) {
+          throw new Error(data.error || 'Could not generate table QR sheets');
+        }
+        const freshTables = data.tables || [];
+        setQrTables(freshTables);
+
+        const targetTables = subset
+          ? freshTables.filter((t) => subset.some((s) => s.id === t.id))
+          : freshTables;
+
+        if (targetTables.length === 0) {
+          setQrNotice({ type: 'err', text: 'No tables available to include in the QR PDF sheet.' });
+          return;
+        }
+
+        downloadAllTableQrsPdf(targetTables, restaurant);
+        setQrNotice({
+          type: 'ok',
+          text: `Generated and downloaded printable QR PDF for ${targetTables.length} ${
+            targetTables.length === 1 ? 'table' : 'tables'
+          }.`,
+        });
+      } catch (err: unknown) {
+        setQrNotice({
+          type: 'err',
+          text: err instanceof Error ? err.message : 'Failed to generate QR PDF sheet',
+        });
+      } finally {
+        setGeneratingQrPdf(false);
+      }
+    },
+    [staffToken, restaurant]
+  );
 
   const loadTableBill = useCallback(
     async (tableId: number) => {
@@ -258,8 +338,33 @@ export function CounterPosDashboard({
       String(o.table_number).includes(search)
   );
 
+  const filteredInvoices = invoices.filter(
+    (inv) =>
+      inv.invoice_number.toLowerCase().includes(search.toLowerCase()) ||
+      String(inv.table_number).includes(search) ||
+      (inv.session_code || '').toLowerCase().includes(search.toLowerCase())
+  );
+
+  const filteredQrTables = qrTables.filter(
+    (t) =>
+      t.label.toLowerCase().includes(search.toLowerCase()) ||
+      t.section.toLowerCase().includes(search.toLowerCase()) ||
+      String(t.table_number).includes(search)
+  );
+
+  const printableItems = (printInvoice?.orders || [])
+    .filter((o) => o.status !== 'cancelled' && o.status !== 'rejected')
+    .flatMap((o) =>
+      o.items
+        .filter((it) => !it.is_cancelled)
+        .map((it) => ({ ...it, order_number: o.order_number }))
+    );
+
+  const printablePayments = (printInvoice?.payments || []).filter((p) => p.status === 'captured');
+
   return (
-    <div className="space-y-6">
+    <>
+    <div className="space-y-6 no-print">
       {/* Header & Tabs */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-zinc-200">
         <div>
@@ -283,6 +388,7 @@ export function CounterPosDashboard({
                 ['tables', 'Table Grid'],
                 ['orders', `Live Orders (${orders.length})`],
                 ['invoices', `Invoices (${invoices.length})`],
+                ['qrs', `QR Sheets (${qrTables.length})`],
               ] as const
             ).map(([k, lbl]) => (
               <button
@@ -406,7 +512,7 @@ export function CounterPosDashboard({
         </div>
       )}
 
-      {/* TAB 3: INVOICES */}
+      {/* TAB 3: INVOICES (COMPLETED SESSIONS) */}
       {tab === 'invoices' && (
         <div className="bg-white border border-zinc-200 rounded-xl overflow-x-auto">
           <table className="w-full text-left text-xs">
@@ -418,31 +524,154 @@ export function CounterPosDashboard({
                 <th className="py-3 px-4 font-semibold text-right">Subtotal</th>
                 <th className="py-3 px-4 font-semibold text-right">Taxes &amp; Svc</th>
                 <th className="py-3 px-4 font-semibold text-right">Grand Total</th>
-                <th className="py-3 px-4 font-semibold text-right">PDF</th>
+                <th className="py-3 px-4 font-semibold text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
-              {invoices.map((inv) => (
-                <tr key={inv.id} className="hover:bg-zinc-50">
-                  <td className="py-3 px-4 font-mono font-semibold">{inv.invoice_number}</td>
-                  <td className="py-3 px-4">Table {String(inv.table_number).padStart(2, '0')}</td>
-                  <td className="py-3 px-4 text-zinc-500">{formatDateTimeIST(inv.created_at)}</td>
-                  <td className="py-3 px-4 text-right tabular-nums">{formatINR(inv.subtotal_paise)}</td>
-                  <td className="py-3 px-4 text-right tabular-nums">{formatINR(inv.gst_paise + inv.service_charge_paise)}</td>
-                  <td className="py-3 px-4 text-right font-semibold tabular-nums">{formatINR(inv.grand_total_paise)}</td>
-                  <td className="py-3 px-4 text-right">
-                    <button
-                      type="button"
-                      onClick={() => downloadInvoicePdf(inv, [], restaurant)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-zinc-900 text-white rounded hover:bg-[#B47B2B] cursor-pointer"
-                    >
-                      <Download className="w-3 h-3" /> PDF
-                    </button>
+              {filteredInvoices.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-10 text-center text-zinc-500">
+                    No completed session invoices found.
                   </td>
                 </tr>
-              ))}
+              ) : (
+                filteredInvoices.map((inv) => (
+                  <tr key={inv.id} className="hover:bg-zinc-50">
+                    <td className="py-3 px-4">
+                      <span className="font-mono font-semibold text-zinc-900">{inv.invoice_number}</span>
+                      {inv.session_code && (
+                        <p className="font-mono text-[11px] text-zinc-400">{inv.session_code}</p>
+                      )}
+                    </td>
+                    <td className="py-3 px-4">Table {String(inv.table_number).padStart(2, '0')}</td>
+                    <td className="py-3 px-4 text-zinc-500">{formatDateTimeIST(inv.created_at)}</td>
+                    <td className="py-3 px-4 text-right tabular-nums">{formatINR(inv.subtotal_paise)}</td>
+                    <td className="py-3 px-4 text-right tabular-nums">{formatINR(inv.gst_paise + inv.service_charge_paise)}</td>
+                    <td className="py-3 px-4 text-right font-semibold tabular-nums">{formatINR(inv.grand_total_paise)}</td>
+                    <td className="py-3 px-4 text-right">
+                      <div className="inline-flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => triggerPrintInvoice(inv)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white border border-zinc-300 text-zinc-800 rounded hover:border-[#B47B2B] hover:text-[#B47B2B] cursor-pointer"
+                        >
+                          <Printer className="w-3 h-3" /> Print Invoice
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => downloadInvoicePdf(inv, inv.orders || [], restaurant)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-zinc-900 text-white rounded hover:bg-[#B47B2B] cursor-pointer"
+                        >
+                          <Download className="w-3 h-3" /> PDF
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* TAB 4: BULK TABLE QR CODE SHEETS */}
+      {tab === 'qrs' && (
+        <div className="space-y-5">
+          <div className="bg-white border border-zinc-200 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <QrCode className="w-4 h-4 text-[#B47B2B]" />
+                <h3 className="text-sm font-bold text-zinc-900">
+                  Bulk Table QR Code Sheets (Print-Ready A4 PDF)
+                </h3>
+              </div>
+              <p className="text-xs text-zinc-500">
+                Generate and download a single multi-page PDF with formatted table plaques, cut guides, and verified table-side ordering QR codes ({qrTables.length} tables · 4 plaques per page).
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+              {search.trim() && filteredQrTables.length > 0 && filteredQrTables.length < qrTables.length && (
+                <button
+                  type="button"
+                  disabled={generatingQrPdf}
+                  onClick={() => handleBulkGenerateQrPdf(filteredQrTables)}
+                  className="px-3.5 py-2 text-xs font-semibold bg-white border border-zinc-300 text-zinc-800 hover:border-[#B47B2B] hover:text-[#B47B2B] rounded-md inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download Filtered ({filteredQrTables.length}) PDF
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={generatingQrPdf || qrTables.length === 0}
+                onClick={() => handleBulkGenerateQrPdf()}
+                className="px-4 py-2 text-xs font-semibold bg-[#B47B2B] hover:bg-[#9A6620] text-white rounded-md inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <Download className="w-3.5 h-3.5" />
+                {generatingQrPdf
+                  ? 'Generating QR PDF...'
+                  : `Generate & Download All Table QRs (${qrTables.length}) as PDF`}
+              </button>
+            </div>
+          </div>
+
+          {qrNotice && (
+            <div
+              className={`p-3 rounded-lg text-xs border flex items-center justify-between gap-2 ${
+                qrNotice.type === 'ok'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-700'
+              }`}
+            >
+              <span>{qrNotice.text}</span>
+              <button
+                type="button"
+                onClick={() => setQrNotice(null)}
+                className="font-semibold hover:underline cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {filteredQrTables.length === 0 ? (
+            <div className="bg-white border border-zinc-200 rounded-xl py-12 text-center text-xs text-zinc-500">
+              No matching tables found for QR sheet generation.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {filteredQrTables.map((t) => (
+                <div
+                  key={t.id}
+                  className="bg-white border border-zinc-200 rounded-xl p-4 flex flex-col items-center text-center"
+                >
+                  <div className="w-full flex items-center justify-between mb-3">
+                    <span className="font-bold text-sm text-zinc-900">{t.label}</span>
+                    <StatusLabel status={t.status} />
+                  </div>
+                  <img
+                    src={t.qr_data_url}
+                    alt={`QR code for ${t.label}`}
+                    className="w-36 h-36 border border-zinc-100 rounded"
+                  />
+                  <p className="mt-2 text-xs text-zinc-500">
+                    {t.section} · {t.capacity} Seats
+                  </p>
+                  <p className="mt-1 font-mono text-[10px] text-zinc-400 break-all line-clamp-1">
+                    {t.qr_relative_url}
+                  </p>
+                  <a
+                    href={t.qr_data_url}
+                    download={`table-${t.table_number}-qr.png`}
+                    className="mt-3 w-full py-1.5 px-3 text-xs font-medium bg-zinc-100 hover:bg-zinc-200 text-zinc-800 rounded-md inline-flex items-center justify-center gap-1.5"
+                  >
+                    <Download className="w-3 h-3" /> Download PNG
+                  </a>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -494,17 +723,30 @@ export function CounterPosDashboard({
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      onClick={() => downloadInvoicePdf(lastInvoice, billData.orders, restaurant)}
+                      onClick={() =>
+                        downloadInvoicePdf(
+                          lastInvoice,
+                          lastInvoice.orders || billData.orders,
+                          restaurant
+                        )
+                      }
                       className="px-3 py-1.5 text-xs font-semibold bg-emerald-700 text-white rounded-md inline-flex items-center gap-1.5 cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" /> Download PDF
                     </button>
                     <button
                       type="button"
-                      onClick={() => window.print()}
-                      className="px-3 py-1.5 text-xs font-semibold bg-white border border-emerald-300 text-emerald-900 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
+                      onClick={() =>
+                        triggerPrintInvoice({
+                          ...lastInvoice,
+                          session_code: lastInvoice.session_code || billData.session?.session_code,
+                          orders: lastInvoice.orders || billData.orders,
+                          payments: lastInvoice.payments || billData.payments,
+                        })
+                      }
+                      className="px-3 py-1.5 text-xs font-semibold bg-white border border-emerald-300 text-emerald-900 hover:bg-emerald-100 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
                     >
-                      <Printer className="w-3.5 h-3.5" /> Print
+                      <Printer className="w-3.5 h-3.5" /> Print Invoice
                     </button>
                   </div>
                 </div>
@@ -757,5 +999,143 @@ export function CounterPosDashboard({
         onCancel={() => setCloseConfirmOpen(false)}
       />
     </div>
+
+    {/* PRINT-ONLY FORMATTED GST RECEIPT */}
+    {printInvoice && (
+      <div className="hidden print-only max-w-md mx-auto p-6 text-black bg-white font-sans">
+        <div className="text-center border-b-2 border-black pb-4">
+          <h1 className="font-display text-2xl font-bold tracking-wide uppercase">
+            {restaurant?.name || 'FoodMitra'}
+          </h1>
+          {restaurant?.tagline && (
+            <p className="text-[11px] text-zinc-700 mt-0.5">{restaurant.tagline}</p>
+          )}
+          <p className="text-xs text-zinc-800 mt-1">
+            {restaurant?.address || '14 Pali Hill Courtyard, Bandra West, Mumbai 400050'}
+          </p>
+          <p className="text-[11px] text-zinc-700 mt-0.5">
+            Tel: {restaurant?.phone || '+91 22 4890 3600'} · GSTIN: {restaurant?.gstin || '27AABCS1429B1Z5'}
+          </p>
+        </div>
+
+        <div className="py-3 border-b border-dashed border-zinc-400 text-xs space-y-1">
+          <div className="flex justify-between font-bold text-sm">
+            <span>TAX INVOICE</span>
+            <span className="font-mono">{printInvoice.invoice_number}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Table</span>
+            <span className="font-semibold">Table {String(printInvoice.table_number).padStart(2, '0')}</span>
+          </div>
+          {printInvoice.session_code && (
+            <div className="flex justify-between">
+              <span>Session</span>
+              <span className="font-mono">{printInvoice.session_code}</span>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <span>Date &amp; Time</span>
+            <span>{formatDateTimeIST(printInvoice.created_at)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Status</span>
+            <span className="font-semibold uppercase">{printInvoice.payment_status}</span>
+          </div>
+        </div>
+
+        <div className="py-3 border-b border-dashed border-zinc-400">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-zinc-400 text-left">
+                <th className="py-1.5 font-semibold">Item</th>
+                <th className="py-1.5 font-semibold text-center">Qty</th>
+                <th className="py-1.5 font-semibold text-right">Amount</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-200">
+              {printableItems.length > 0 ? (
+                printableItems.map((it) => (
+                  <tr key={`${it.order_number}-${it.id}`}>
+                    <td className="py-1.5 pr-2">
+                      <p className="font-medium text-black">{it.item_name}</p>
+                      {(it.variant_name || (it.addons && it.addons.length > 0)) && (
+                        <p className="text-[10px] text-zinc-600">
+                          {[it.variant_name, ...(it.addons || []).map((a) => a.name)]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </p>
+                      )}
+                    </td>
+                    <td className="py-1.5 text-center font-mono tabular-nums">{it.quantity}</td>
+                    <td className="py-1.5 text-right font-mono tabular-nums">
+                      {formatINR(it.line_total_paise)}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td className="py-2">Consolidated Table Session Charges</td>
+                  <td className="py-2 text-center font-mono">1</td>
+                  <td className="py-2 text-right font-mono tabular-nums">
+                    {formatINR(printInvoice.subtotal_paise)}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="py-3 border-b-2 border-black text-xs space-y-1.5">
+          <div className="flex justify-between">
+            <span>Subtotal</span>
+            <span className="font-mono tabular-nums">{formatINR(printInvoice.subtotal_paise)}</span>
+          </div>
+          {printInvoice.discount_paise > 0 && (
+            <div className="flex justify-between">
+              <span>Discount</span>
+              <span className="font-mono tabular-nums">-{formatINR(printInvoice.discount_paise)}</span>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <span>GST (5%)</span>
+            <span className="font-mono tabular-nums">{formatINR(printInvoice.gst_paise)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Service Charge (5%)</span>
+            <span className="font-mono tabular-nums">{formatINR(printInvoice.service_charge_paise)}</span>
+          </div>
+          <div className="flex justify-between text-sm font-bold pt-2 border-t border-zinc-400">
+            <span>GRAND TOTAL</span>
+            <span className="font-mono tabular-nums">{formatINR(printInvoice.grand_total_paise)}</span>
+          </div>
+          <div className="flex justify-between font-semibold pt-1">
+            <span>Total Paid</span>
+            <span className="font-mono tabular-nums">{formatINR(printInvoice.paid_paise)}</span>
+          </div>
+        </div>
+
+        {printablePayments.length > 0 && (
+          <div className="py-3 border-b border-dashed border-zinc-400 text-[11px] space-y-1">
+            <p className="font-semibold uppercase tracking-wider text-zinc-700">Payment Summary</p>
+            {printablePayments.map((p) => (
+              <div key={p.id} className="flex justify-between">
+                <span className="uppercase">
+                  {p.method} {p.provider_payment_id ? `(${p.provider_payment_id})` : ''}
+                </span>
+                <span className="font-mono tabular-nums">{formatINR(p.amount_paise)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="pt-4 text-center text-[11px] text-zinc-700 space-y-1">
+          <p className="font-semibold text-black">
+            Thank you for dining with {restaurant?.name || 'FoodMitra'}!
+          </p>
+          <p>Computer-generated GST Tax Invoice · No signature required</p>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

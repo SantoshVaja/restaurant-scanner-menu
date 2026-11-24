@@ -333,7 +333,7 @@ export function AdminDashboard({
     const doc = new jsPDF({ unit: 'pt', format: 'a4' });
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(16);
-    doc.text(`${restaurant?.name || 'Saffron & Ember'} — Financial Sales Report`, 44, 48);
+    doc.text(`${restaurant?.name || 'FoodMitra'} — Financial Sales Report`, 44, 48);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
     doc.text(`Generated: ${new Date().toLocaleString('en-IN')}`, 44, 66);

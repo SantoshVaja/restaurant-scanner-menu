@@ -1,4 +1,4 @@
-# Saffron & Ember — Restaurant 360°
+# FoodMitra — Restaurant 360°
 
 A full-stack luxury restaurant website and smart dining operations platform featuring cryptographic QR table ordering, multi-round table sessions, separate kitchen ticketing, consolidated billing, online payment verification, real-time WebSocket synchronization, and role-based operations dashboards.
 
@@ -44,18 +44,18 @@ Click **Staff & Operations Portal** in the website footer (or navigate to `/staf
 
 | Role | Email | Demo Password | Access Scope |
 | --- | --- | --- | --- |
-| Super Admin / Owner | `owner@saffronember.in` | `Owner@360` | Full system, settings, QR regeneration, QA Lab, demo reset |
-| Restaurant Admin | `admin@saffronember.in` | `Admin@360` | Menu, categories, tables, QRs, staff, coupons, reports |
-| Kitchen Chef | `chef@saffronember.in` | `Chef@360` | Kitchen Display System (KDS) & ticket transitions |
-| Counter / POS | `counter@saffronember.in` | `Counter@360` | Table grid, consolidated bills, payments, refunds, PDF invoices |
-| Dining Waiter | `waiter@saffronember.in` | `Waiter@360` | Assigned tables & ready-to-serve delivery workflow |
+| Super Admin / Owner | `owner@foodmitra.in` | `Owner@360` | Full system, settings, QR regeneration, QA Lab, demo reset |
+| Restaurant Admin | `admin@foodmitra.in` | `Admin@360` | Menu, categories, tables, QRs, staff, coupons, reports |
+| Kitchen Chef | `chef@foodmitra.in` | `Chef@360` | Kitchen Display System (KDS) & ticket transitions |
+| Counter / POS | `counter@foodmitra.in` | `Counter@360` | Table grid, consolidated bills, payments, refunds, PDF invoices |
+| Dining Waiter | `waiter@foodmitra.in` | `Waiter@360` | Assigned tables & ready-to-serve delivery workflow |
 
 ## Testing QR Ordering
 
 1. Log in as Admin or Super Admin on `/staff`.
 2. Open **Tables & QR Codes**.
 3. Click **Open QR** on any table (e.g., Table 02) to open `/order?table=2&token=...`.
-4. Add dishes, apply coupon `SAFFRON10`, complete payment, watch the order update live from the **Kitchen KDS**, place a second round from the same table, and settle the consolidated bill in **Counter POS**.
+4. Add dishes, apply coupon `FOODMITRA10`, complete payment, watch the order update live from the **Kitchen KDS**, place a second round from the same table, and settle the consolidated bill in **Counter POS**.
 
 ## Automated Testing & Build
 

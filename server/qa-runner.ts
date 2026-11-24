@@ -268,6 +268,16 @@ export async function runAutomatedQASuite(): Promise<QAReport> {
     assert.ok(t2Ticket);
     assertions += 2;
 
+    const chefNotifsRes = await jsonReq(baseUrl, '/api/notifications', {
+      headers: { Authorization: `Bearer ${tokens.chef}` },
+    });
+    assert.strictEqual(chefNotifsRes.status, 200);
+    const hasKitchenNotif = chefNotifsRes.data.notifications.some(
+      (n: any) => n.reference_id === t2Ticket.ticket_number
+    );
+    assert.strictEqual(hasKitchenNotif, true);
+    assertions += 2;
+
     for (const next of ['accepted', 'preparing', 'ready']) {
       const tr = await jsonReq(baseUrl, `/api/kitchen/tickets/${t2Ticket.id}/status`, {
         method: 'POST',
@@ -275,7 +285,12 @@ export async function runAutomatedQASuite(): Promise<QAReport> {
         body: JSON.stringify({ status: next }),
       });
       assert.strictEqual(tr.status, 200);
-      assertions += 1;
+      assert.strictEqual(tr.data.ticket_status, next);
+      assert.strictEqual(tr.data.ticket?.status, next);
+      if (next === 'accepted') {
+        assert.ok(tr.data.ticket?.accepted_by_name);
+      }
+      assertions += 3;
     }
 
     const sessCheck = await jsonReq(baseUrl, '/api/table-session/current', {
@@ -572,7 +587,7 @@ export async function runAutomatedQASuite(): Promise<QAReport> {
   const total = cases.length;
 
   return {
-    project_name: 'Saffron & Ember — Restaurant 360°',
+    project_name: 'FoodMitra — Restaurant 360°',
     version: '1.0.0',
     executed_at: new Date().toISOString(),
     final_status: failed > 0 ? 'FAIL' : 'PASS',
