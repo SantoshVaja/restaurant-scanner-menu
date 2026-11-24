@@ -71,8 +71,10 @@ export function CustomerOrderPortal({
     label: string;
     section: string;
   } | null>(null);
-  const [sessionInfo, setSessionInfo] = useState<{ id: number; session_code: string } | null>(null);
+  const [sessionInfo, setSessionInfo] = useState<{ id: number; session_code: string; status?: string } | null>(null);
   const [customerToken, setCustomerToken] = useState<string | null>(null);
+  const [sessionClosed, setSessionClosed] = useState(false);
+  const [closedInvoiceNumber, setClosedInvoiceNumber] = useState<string | null>(null);
 
   // Active tab: menu vs live tracking
   const [viewMode, setViewMode] = useState<'menu' | 'tracking'>('menu');
@@ -193,10 +195,21 @@ export function CustomerOrderPortal({
         });
         if (!resp.ok) return;
         const data = await parseJsonSafe<{
+          session?: { id: number; session_code: string; status?: string };
+          invoice_number?: string | null;
           orders?: Order[];
           totals?: typeof sessionTotals;
         }>(resp);
         const nextOrders = data.orders || [];
+        if (data.session?.status === 'closed') {
+          setSessionClosed(true);
+          if (data.invoice_number) {
+            setClosedInvoiceNumber(data.invoice_number);
+          }
+          setCart([]);
+          setCartOpen(false);
+          setConfirmOpen(false);
+        }
 
         if (!initialOrdersLoadedRef.current) {
           initialOrdersLoadedRef.current = true;
@@ -279,6 +292,7 @@ export function CustomerOrderPortal({
           orderNumber?: string;
           status?: string;
           orderStatus?: string;
+          invoiceNumber?: string | null;
         };
         if (
           p.type === 'kitchen_status_changed' &&
@@ -286,6 +300,14 @@ export function CustomerOrderPortal({
           typeof p.orderId === 'number'
         ) {
           triggerReadyToast(p.orderId, p.orderNumber);
+        }
+        if (p.type === 'session_closed') {
+          setSessionClosed(true);
+          if (p.invoiceNumber) setClosedInvoiceNumber(p.invoiceNumber);
+          setCart([]);
+          setCartOpen(false);
+          setConfirmOpen(false);
+          setViewMode('tracking');
         }
       }
       if (customerToken && tableInfo && (eventName === 'sync:update' || eventName === 'menu:updated')) {
@@ -782,17 +804,45 @@ export function CustomerOrderPortal({
                 Table {paddedTable} Live Order Tracker
               </h2>
               <p className="mt-1 text-xs text-zinc-600">
-                Each order sends a separate ticket to the kitchen and updates your consolidated table bill automatically.
+                {sessionClosed
+                  ? 'This dining session is settled and completed. Table is now available for the next guests.'
+                  : 'Each order sends a separate ticket to the kitchen and updates your consolidated table bill automatically.'}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => setViewMode('menu')}
-              className="px-4 py-2.5 text-xs font-semibold bg-[#18181B] text-white hover:bg-[#B47B2B] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              + Order More Items
-            </button>
+            {sessionClosed ? (
+              <button
+                type="button"
+                onClick={onExitToSite}
+                className="px-4 py-2.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Session Completed · Done
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setViewMode('menu')}
+                className="px-4 py-2.5 text-xs font-semibold bg-[#18181B] text-white hover:bg-[#B47B2B] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                + Order More Items
+              </button>
+            )}
           </div>
+
+          {sessionClosed && (
+            <div className="bg-emerald-50 border border-emerald-300 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 text-emerald-900">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold">
+                    Thank you for dining with {restaurant?.name || 'FoodMitra'}!
+                  </p>
+                  <p className="text-xs text-emerald-800">
+                    Table {paddedTable} session is complete{closedInvoiceNumber ? ` · Invoice ${closedInvoiceNumber}` : ''}.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {sessionOrders.length === 0 ? (
             <div className="bg-white border border-zinc-200 rounded-xl p-12 text-center">
@@ -952,7 +1002,7 @@ export function CustomerOrderPortal({
       )}
 
       {/* Compact Sticky Cart Bar (Strict <= 15% mobile height) */}
-      {cart.length > 0 && !cartOpen && !confirmOpen && !pendingPayment && (
+      {cart.length > 0 && !sessionClosed && !cartOpen && !confirmOpen && !pendingPayment && (
         <div className="fixed bottom-3 left-0 right-0 z-30 px-4 pointer-events-none">
           <div className="max-w-3xl mx-auto pointer-events-auto">
             <button

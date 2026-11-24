@@ -450,11 +450,15 @@ export function CounterPosDashboard({
                       <span>Bill Total</span>
                       <span className="tabular-nums">{formatINR(t.total_bill_paise || 0)}</span>
                     </div>
-                    {(t.outstanding_paise || 0) > 0 && (
+                    {(t.outstanding_paise || 0) > 0 ? (
                       <p className="text-red-600 font-semibold tabular-nums">
                         Due: {formatINR(t.outstanding_paise || 0)}
                       </p>
-                    )}
+                    ) : (t.pending_kitchen_count || 0) === 0 ? (
+                      <p className="text-emerald-700 font-semibold">
+                        Paid &amp; Served · Click to Complete &amp; Free Table
+                      </p>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="mt-4 pt-3 border-t border-zinc-100 text-xs text-zinc-400">

@@ -215,10 +215,11 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
   }
 
   // Middleware: Customer Table Session Token Auth
-  function requireTableSession(req: Request, res: Response, next: NextFunction) {
+  function authenticateTableSession(req: Request, res: Response, allowClosed = false) {
     const token = String(req.headers['x-table-session-token'] || '').trim();
     if (!token) {
-      return res.status(401).json({ error: 'Valid table QR session required. Please scan your table QR code.' });
+      res.status(401).json({ error: 'Valid table QR session required. Please scan your table QR code.' });
+      return null;
     }
     const row = db
       .prepare(
@@ -232,23 +233,37 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
       | { table_id: number; session_id: number; table_number: number; session_code: string; status: string }
       | undefined;
 
-    if (!row || row.status === 'closed') {
-      return res.status(403).json({ error: 'Table session expired or closed. Please scan the table QR code again.' });
+    if (!row || (!allowClosed && row.status === 'closed')) {
+      res.status(403).json({ error: 'Table session expired or closed. Please scan the table QR code again.' });
+      return null;
     }
 
     // Prevent cross-table tampering if client passes ?table= or body.table_number
     const claimedTable = req.query.table || (req.body && req.body.table_number);
     if (claimedTable !== undefined && Number(claimedTable) !== row.table_number) {
-      return res.status(403).json({
+      res.status(403).json({
         error: `Cross-table access blocked. Token is strictly bound to Table ${String(row.table_number).padStart(2, '0')}.`,
       });
+      return null;
     }
 
-    req.tableSession = {
+    return {
       tableId: row.table_id,
       tableNumber: row.table_number,
       sessionId: row.session_id,
       sessionCode: row.session_code,
+      status: row.status,
+    };
+  }
+
+  function requireTableSession(req: Request, res: Response, next: NextFunction) {
+    const resolved = authenticateTableSession(req, res, false);
+    if (!resolved) return;
+    req.tableSession = {
+      tableId: resolved.tableId,
+      tableNumber: resolved.tableNumber,
+      sessionId: resolved.sessionId,
+      sessionCode: resolved.sessionCode,
     };
     return next();
   }
@@ -649,13 +664,25 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
     });
   });
 
-  app.get('/api/table-session/current', requireTableSession, (req, res) => {
-    const sess = req.tableSession!;
+  app.get('/api/table-session/current', (req, res) => {
+    const sess = authenticateTableSession(req, res, true);
+    if (!sess) return;
     const table = db.prepare('SELECT id, table_number, label, section, capacity, status FROM dining_tables WHERE id = ?').get(sess.tableId);
     const bill = getSessionBillSummary(sess.sessionId);
+    const invoice =
+      sess.status === 'closed'
+        ? (db.prepare('SELECT invoice_number FROM invoices WHERE table_session_id = ? ORDER BY id DESC LIMIT 1').get(sess.sessionId) as
+            | { invoice_number: string }
+            | undefined)
+        : undefined;
     res.json({
       table,
-      session: { id: sess.sessionId, session_code: sess.sessionCode },
+      session: {
+        id: sess.sessionId,
+        session_code: sess.sessionCode,
+        status: sess.status,
+      },
+      invoice_number: invoice?.invoice_number || null,
       ...bill,
     });
   });
@@ -1725,7 +1752,11 @@ export function createApp(db: DBInstance, realtime: RealtimeHub, options?: { run
     writeAudit(req.staffUser!.id, req.staffUser!.role, 'table_session_closed', 'table_sessions', activeSess.id, {
       tableId,
     });
-    realtime.broadcastOrderUpdate(activeSess.id, { type: 'session_closed', tableId });
+    realtime.broadcastOrderUpdate(activeSess.id, {
+      type: 'session_closed',
+      tableId,
+      invoiceNumber: (invoice as Record<string, unknown>)?.invoice_number || null,
+    });
     res.json({
       ok: true,
       invoice: {
